@@ -57,7 +57,8 @@ seçildi**, aylık toplamın $20'den sapması kabul edildi. Sapma bilgi taşıyo
 |---|---|---|
 | Rakamın amacı | Kendi maliyet takibi | Üçüncü tarafa gösterilmiyor; **karşılaştırılabilirlik** kritik |
 | Sabit rakam neye orantılı | Token tüketimi (API-karşılığı) | Ağır oturum pahalı çıksın; süre bazlı model token yoğunluğunu görmezden gelirdi |
-| Taban nasıl belirlenir | Geçmişten türet, sonra dondur | Kafadan rakam atmaya gerek yok; kendiliğinden değişmediği için sabitlik korunur |
+| Taban nasıl belirlenir | Elle set edilir; araç yalnızca **tavsiye** verir | Geçmiş aylar hesaba katılmayacak (kullanıcı kararı). Takip bu aydan başlıyor, dolayısıyla türetilecek tamamlanmış ay yok. Rakam kullanıcının, dondurulmuş. |
+| Takip başlangıcı | `tracking_start_month` config | "Bu aydan itibaren başlayalım" — öncesindeki 52 oturum hiç görünmesin, etiketlenmesi istenmesin |
 | Session seçimi | İkili etiket (dahil/hariç), session bazlı | Klasör yolu yetmiyor: aynı klasörde iki tür iş olabiliyor |
 | Etiketsizler | Üçüncü durum | Sessizce yanlış rakam üretmemek; araçtaki "bilinmeyen model" ilkesinin aynısı |
 | Çok makine | Elle export/import | Sıfır altyapı, daemon yok, zamanlanmış iş yok |
@@ -139,8 +140,10 @@ Mevcut bayraklar korunur. Eklenenler:
 --tag-list [--untagged]             # session'lari etiketleriyle listele
 --untag <session-id>                # etiketi kaldir (etiketsize dondur)
 
---seed-baseline             # tamamlanmis aylardaki DAHIL session'lardan taban turet
---set-baseline <tutar>      # tabani elle yaz
+--set-baseline <tutar>      # tabani yaz (birincil yol)
+--suggest-baseline          # tavsiye: dahil edilenlerin bu ayki toplamini goster,
+                            #   HICBIR SEY YAZMAZ
+--set-tracking-start <YYYY-MM>  # takip baslangic ayi
 ```
 
 `--tag-project` deseni, session'ın **`cwd` alanına** uygulanan bir
@@ -156,18 +159,30 @@ kaldırmak için var.
 Komut, yazmadan önce kaç session'ı etkileyeceğini gösterir ve onay ister
 (`--yes` ile atlanabilir) — 54 session'ı yanlışlıkla etiketlemek kolay olmasın.
 
+## Takip başlangıcı
+
+```json
+{"tracking_start_month": "2026-08"}
+```
+
+Bu aydan **önce** başlayan session'lar tamamen yok sayılır: rapora girmez,
+`--tag-list` içinde listelenmez, "etiketsiz" uyarısı üretmez. Kullanıcı
+takibe bu aydan başlıyor; öncesindeki 52 oturum (Haziran+Temmuz) geriye dönük
+etiketlenmeyecek.
+
+Set edilmemişse tüm session'lar kapsamdadır (geriye uyumluluk).
+
 ## Taban (baseline)
 
 Config'e eklenir ve **kendiliğinden asla değişmez**:
 
 ```json
 {
-  "baseline_monthly_api_cost": 1500.0,
+  "baseline_monthly_api_cost": 1200.0,
   "baseline_source": {
     "set_at": "2026-08-17T10:00:00+00:00",
-    "method": "seed",
-    "months": ["2026-06", "2026-07"],
-    "values": [360.68, 2432.66]
+    "method": "manual",
+    "note": "Agustos'un ilk yarisindaki dahil edilen oturumlara bakilarak secildi"
   }
 }
 ```
@@ -175,18 +190,36 @@ Config'e eklenir ve **kendiliğinden asla değişmez**:
 `baseline_source` zorunlu: aylar sonra "$0.46 nereden çıktı" sorusunun cevabı
 config'de dursun.
 
-**`--seed-baseline` algoritması:**
+### Neden geçmişten türetilmiyor
 
-1. Yerel + import edilmiş tüm session'ları topla.
-2. Yalnızca **dahil** etiketli olanları al.
-3. Başlangıç ayına göre grupla.
-4. **Tamamlanmış** ayları seç (içinde bulunulan ay hariç).
-5. Ay toplamlarının **medyanını** al (çift sayıda ayda ortadaki iki değerin
-   ortalaması — `statistics.median` davranışı). Medyan, tek bir sıradışı ayın
-   tabanı bozmasını engeller.
-6. Config'e `baseline_monthly_api_cost` + `baseline_source` yaz.
+Takip bu aydan başlıyor, dolayısıyla türetilecek tamamlanmış ay yok. Geçmiş
+aylar (Haziran $360, Temmuz $2.432) kullanıcı kararıyla kapsam dışı. Bu
+nedenle **`--seed-baseline` gibi bir otomatik türetme komutu yok** — olmayan
+veriden rakam üretmek, aracın "sessizce yanlış sayı basma" ilkesine aykırı
+olurdu.
 
-Tamamlanmış ay yoksa hata verir ve `--set-baseline` önerir.
+### `--suggest-baseline` (yalnızca tavsiye)
+
+Hiçbir şey yazmaz, yalnızca karar vermeye yardım eder:
+
+```
+Takip baslangici: 2026-08
+
+  Dahil edilen (2026-08, su ana kadar) : 12 session   $684,20
+  Ayin gecen kismi                     : 17/31 gun
+  Dogrusal izdüsüm (tam ay)             : ~$1.247,00
+
+  Etiketsiz: 4 session  $196,73   <-- once bunlari etiketle, sayi degisir
+
+Tabani sen seciyorsun. Ornek:
+  claude_cost.py --set-baseline 1250
+```
+
+Doğrusal izdüşüm **tahmindir** ve öyle etiketlenir: kullanım düzensiz
+olduğunda yanıltır. Karar kullanıcınındır; araç rakamı kendisi yazmaz.
+
+Etiketsiz oturum varken uyarı basar — çünkü onlar etiketlenince "dahil"
+toplamı değişir ve taban yanlış seçilmiş olur.
 
 ## Formül
 
@@ -245,8 +278,9 @@ yerine sabit oranlı hesap gelir. `month_totals()` etiket kırılımı döndüre
 
 | Durum | Davranış |
 |---|---|
-| Taban set edilmemiş | Rapor **durur**, `--seed-baseline` önerir. Uydurma varsayılan yok. |
-| `--seed-baseline`, tamamlanmış ay yok | Hata + `--set-baseline` öner |
+| Taban set edilmemiş | Rapor **durur**, `--suggest-baseline` + `--set-baseline` önerir. Uydurma varsayılan yok. |
+| Takip başlangıcından önceki session | Tamamen yok sayılır (listelenmez, uyarı üretmez) |
+| `--set-baseline` ≤ 0 | Hata |
 | Import dosyası bozuk / sürüm bilinmiyor | Dosya atlanır, adı ve sebep uyarı olarak basılır |
 | Aynı session yerelde ve import'ta | Yerel kazanır, çift sayılmaz |
 | Etiket dosyası yok | Hepsi etiketsiz; rapor bunu açıkça yazar |
@@ -269,6 +303,8 @@ yerine sabit oranlı hesap gelir. `month_totals()` etiket kırılımı döndüre
 20. **Etiketsiz izolasyonu** — etiketsiz session'lar dahil toplamına girmiyor,
     ayrı satırda görünüyor.
 21. **Taban yokluğu** — taban set edilmemişken rapor sayı üretmiyor, hata veriyor.
+22. **Takip başlangıcı** — başlangıç ayından önceki session'lar hiçbir toplama
+    girmiyor ve etiketsiz listesinde çıkmıyor.
 
 19 numara bu tasarımın varlık sebebidir; asıl şikâyetin bir daha oluşamayacağını
 her çalıştırmada kanıtlar.
@@ -276,19 +312,23 @@ her çalıştırmada kanıtlar.
 ## Uygulama sırası
 
 1. Etiket deposu (`cost-tags.json`) + `--tag` / `--untag` / `--tag-list`
-2. `--tag-project` toplu tohumlama
-3. Taban: `--seed-baseline` / `--set-baseline` + `baseline_source`
-4. Sabit oran formülü + session raporunun B bölümü
-5. Aylık raporun etiket kırılımı + kullanım oranı
-6. `--export` / `--machine` + `cost-imports/` birleştirme
-7. Selftest 16-21
-8. README + SKILL.md güncelle, sürüm 2.0.0
+2. `tracking_start_month` + `--set-tracking-start` (kapsam filtresi)
+3. `--tag-project` toplu tohumlama
+4. Taban: `--set-baseline` / `--suggest-baseline` + `baseline_source`
+5. Sabit oran formülü + session raporunun B bölümü
+6. Aylık raporun etiket kırılımı + kullanım oranı
+7. `--export` / `--machine` + `cost-imports/` birleştirme
+8. Selftest 16-22
+9. README + SKILL.md güncelle, sürüm 2.0.0
 
-Adım 1-5 tek makinede çalışan bitmiş bir ürün verir; 6 kapsamı genişletir.
+Adım 1-6 tek makinede çalışan bitmiş bir ürün verir; 7 kapsamı genişletir.
 
 ## Kapsam dışı (bilinçli)
 
 - Otomatik senkronizasyon (git/rsync/SSH çekme) — elle export/import seçildi.
+- Geçmişten taban türetme (`--seed-baseline`) — takip bu aydan başlıyor,
+  türetilecek tamamlanmış ay yok. İleride birkaç tam ay biriktiğinde yeniden
+  değerlendirilebilir; o zaman gerçek veri üzerinden tasarlanır.
 - Müşteri/proje bazlı etiket (serbest metin) — ikili etiket seçildi. Etiket
   deposunun şeması ileride genişletmeye izin verecek şekilde sürümlü.
 - Gerçek Anthropic fatura API'si — abonelikte token bazlı tutar nominal.
