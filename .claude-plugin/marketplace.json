@@ -1,0 +1,18 @@
+{
+  "name": "claude-cost",
+  "description": "Claude Code session sure ve maliyet raporlama araclari",
+  "owner": {
+    "name": "cemozay"
+  },
+  "plugins": [
+    {
+      "name": "cost",
+      "description": "/cost - session suresi, token kullanimi, API-karsiligi maliyet ve plan payi raporu",
+      "version": "1.0.0",
+      "source": "./",
+      "author": {
+        "name": "cemozay"
+      }
+    }
+  ]
+}
