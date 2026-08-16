@@ -34,6 +34,10 @@ TAGS_PATH = Path.home() / ".claude" / "cost-tags.json"
 DEFAULT_CONFIG = {
     "plan": {"amount": 20.0, "currency": "USD", "label": "Pro"},
     "idle_gap_seconds": 300,
+    # Bu aydan ONCE baslayan session'lar hic gorunmez: rapora girmez,
+    # --tag-list'te listelenmez, "etiketsiz" uyarisi uretmez.
+    # None = tum gecmis kapsamda (geriye uyumluluk).
+    "tracking_start_month": None,
     "pricing_per_mtok": {
         "claude-fable-5":   {"input": 10.0, "output": 50.0},
         "claude-mythos-5":  {"input": 10.0, "output": 50.0},
@@ -450,6 +454,17 @@ def price_requests(requests, config):
 
 def month_key(dt):
     return to_local(dt).strftime("%Y-%m")
+
+
+def in_tracking_scope(start_dt, config):
+    """Session takip kapsaminda mi? month_key 'YYYY-MM' dondugu icin
+    dize karsilastirmasi kronolojik siralamayla ayni sonucu verir."""
+    start_month = config.get("tracking_start_month")
+    if not start_month:
+        return True
+    if start_dt is None:
+        return False
+    return month_key(start_dt) >= start_month
 
 
 def month_totals(month, config, quiet=True):
@@ -904,6 +919,20 @@ def selftest(config, config_path):
         except OSError:
             pass
 
+    print("\n-- 22. Takip baslangici --")
+    _c22 = json.loads(json.dumps(config))
+    _c22["tracking_start_month"] = "2026-08"
+    _t_in = parse_ts("2026-08-15T10:00:00.000Z")
+    _t_out = parse_ts("2026-07-15T10:00:00.000Z")
+    _c22none = json.loads(json.dumps(config))
+    _c22none["tracking_start_month"] = None
+    results.append(_ok(
+        "22. Takip baslangicindan onceki session kapsam disi",
+        in_tracking_scope(_t_in, _c22) is True
+        and in_tracking_scope(_t_out, _c22) is False
+        and in_tracking_scope(_t_out, _c22none) is True,
+        "2026-08 esigi: Agu ici -> True, Tem -> False, esik yokken -> True"))
+
     print("\n-- 10. Capraz platform (statik gozden gecirme) --")
     src = Path(__file__).read_text(encoding="utf-8")
     # Selftest'in KENDI govdesi taramadan cikarilir: asagidaki kontrollerin
@@ -957,6 +986,8 @@ def main(argv=None):
                     help="ara esigi (dakika) - bu calistirma icin")
     ap.add_argument("--set-idle-gap", type=float, metavar="DK",
                     help="ara esigini (dakika) config'e kalici yaz")
+    ap.add_argument("--set-tracking-start", metavar="YYYY-MM",
+                    help="takip baslangic ayini config'e kalici yaz")
     ap.add_argument("--currency", metavar="KOD",
                     help="para birimi (--set-plan ile birlikte kalici)")
     ap.add_argument("--label", metavar="AD", help="plan etiketi (Pro, Max, ...)")
@@ -968,7 +999,8 @@ def main(argv=None):
 
     config, config_path = load_config(args.config)
 
-    if args.set_plan is not None or args.set_idle_gap is not None:
+    if (args.set_plan is not None or args.set_idle_gap is not None
+            or args.set_tracking_start is not None):
         if args.set_plan is not None:
             config["plan"]["amount"] = float(args.set_plan)
         if args.set_idle_gap is not None:
@@ -976,6 +1008,15 @@ def main(argv=None):
                 sys.stderr.write("HATA: --set-idle-gap sifirdan buyuk olmali.\n")
                 return 2
             config["idle_gap_seconds"] = float(args.set_idle_gap) * 60.0
+        if args.set_tracking_start is not None:
+            txt = args.set_tracking_start.strip()
+            try:
+                datetime.datetime.strptime(txt, "%Y-%m")
+            except ValueError:
+                sys.stderr.write("HATA: --set-tracking-start YYYY-MM biciminde "
+                                 "olmali (ornek 2026-08).\n")
+                return 2
+            config["tracking_start_month"] = txt
         if args.currency:
             config["plan"]["currency"] = args.currency
         if args.label:
@@ -986,6 +1027,8 @@ def main(argv=None):
             config["plan"]["amount"], config["plan"]["currency"],
             config["plan"].get("label", "")))
         print("  ara esigi: {}".format(fmt_threshold(config["idle_gap_seconds"])))
+        print("  takip baslangici: {}".format(
+            config.get("tracking_start_month") or "(tum gecmis)"))
         return 0
 
     if args.idle_gap is not None:
