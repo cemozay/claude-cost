@@ -39,6 +39,8 @@ Kullanıcının isteğine göre argüman ekle:
 | belirli bir ay | `--month 2026-07` |
 | "plan aslında $100" (geçici) | `--plan 100` |
 | "plan tutarını kalıcı değiştir" | `--set-plan 100` |
+| "ara eşiğini 10 dk yap" (geçici) | `--idle-gap 10` |
+| "ara eşiğini kalıcı değiştir" | `--set-idle-gap 10` |
 | para birimi değişikliği | `--currency EUR` (kalıcı için `--set-plan` ile birlikte) |
 | makine okunur çıktı | `--json` |
 | aracın kendini doğrulaması | `--selftest` |
@@ -62,5 +64,10 @@ Kullanıcının isteğine göre argüman ekle:
   Dağıtım anahtarı ham token değil maliyettir (output token input'un 5 katı pahalı).
 - **Ay bitmemişse** çıktıda `(ay içi, geçici)` etiketi görünür; ay ilerledikçe
   aynı session'ın payı düşer. Bu beklenen davranıştır, hata değil.
+- **Molalar zaten düşülür.** Kullanıcı "aramı sayma", "limit yedim beklerken
+  geçen süre sayılmasın" derse: `Aktif` satırı tam olarak budur, yeni bir şey
+  gerekmez. Eşiği aşan her boşluk düşülür ve `haric tutulan aralar` listesinde
+  tek tek gösterilir. Eşik uymuyorsa `--idle-gap <dk>` ile denet.
+  Faturalanacak rakam `Duvar saati` değil **`Aktif`**'tir.
 - Config dosyası: `~/.claude/cost-config.json` (ilk çalıştırmada otomatik oluşur,
   repoya girmez, her makinede yereldir).

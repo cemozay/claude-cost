@@ -1,7 +1,7 @@
 {
   "name": "cost",
   "description": "/cost - session suresi, token kullanimi, API-karsiligi maliyet ve plan payi raporu",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": {
     "name": "cemozay"
   },

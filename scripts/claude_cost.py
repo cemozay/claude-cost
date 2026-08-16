@@ -21,7 +21,7 @@ import datetime
 
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # ---------------------------------------------------------------- sabitler
 
@@ -95,6 +95,16 @@ def fmt_dur(seconds):
     if h:
         return "{}sa {:02d}dk {:02d}sn".format(h, m, s)
     return "{}dk {:02d}sn".format(m, s)
+
+
+def fmt_threshold(seconds):
+    """Esik gosterimi: tam dakikaysa '5dk', degilse '90sn' / '1dk 30sn'."""
+    seconds = float(seconds)
+    if seconds >= 60 and abs(seconds % 60) < 1e-9:
+        return "{:g}dk".format(seconds / 60)
+    if seconds < 60:
+        return "{:g}sn".format(seconds)
+    return fmt_dur(seconds)
 
 
 def parse_ts(raw):
@@ -255,21 +265,26 @@ def compute_duration(timestamps, idle_gap):
     """wall = son - ilk; active = esigi asmayan ardisik farklarin toplami."""
     if len(timestamps) < 2:
         return {"wall": 0.0, "active": 0.0, "idle": 0.0, "gaps": 0,
+                "gap_list": [],
                 "start": timestamps[0] if timestamps else None,
                 "end": timestamps[0] if timestamps else None}
 
     wall = (timestamps[-1] - timestamps[0]).total_seconds()
     active = 0.0
     idle = 0.0
-    gaps = 0
+    gap_list = []
     for i in range(1, len(timestamps)):
         delta = (timestamps[i] - timestamps[i - 1]).total_seconds()
         if delta > idle_gap:
             idle += delta
-            gaps += 1
+            # Hangi aralarin dusuldugu denetlenebilsin diye kaydedilir:
+            # freelance faturalamada rakamin savunulabilir olmasi gerekir.
+            gap_list.append({"at": timestamps[i - 1], "seconds": delta})
         else:
             active += delta
-    return {"wall": wall, "active": active, "idle": idle, "gaps": gaps,
+    gap_list.sort(key=lambda g: -g["seconds"])
+    return {"wall": wall, "active": active, "idle": idle, "gaps": len(gap_list),
+            "gap_list": gap_list,
             "start": timestamps[0], "end": timestamps[-1]}
 
 
@@ -460,9 +475,17 @@ def render_text(report):
         L.append("")
         L.append("Sure")
         L.append("  Duvar saati : {}".format(fmt_dur(d["wall"])))
-        L.append("  Aktif       : {}   ({} bosluk haric, esik {}dk)".format(
+        L.append("  Aktif       : {}   ({} bosluk haric, esik {})".format(
             fmt_dur(d["active"]), fmt_dur(d["idle"]),
-            int(report["idle_gap"] // 60)))
+            fmt_threshold(report["idle_gap"])))
+        gl = d.get("gap_list") or []
+        if gl:
+            L.append("    haric tutulan aralar ({} adet):".format(len(gl)))
+            for g in gl[:6]:
+                L.append("      {}  {:>14}".format(
+                    to_local(g["at"]).strftime("%d %b %H:%M"), fmt_dur(g["seconds"])))
+            if len(gl) > 6:
+                L.append("      ... {} ara daha".format(len(gl) - 6))
         L.append("")
 
         t = report["tokens"]
@@ -685,6 +708,16 @@ def selftest(config, config_path):
     results.append(_ok("3c. esik 10^9 iken active == wall",
                        abs(huge["active"] - huge["wall"]) <= 1.0,
                        "{:.1f}s vs {:.1f}s".format(huge["active"], huge["wall"])))
+    results.append(_ok("3d. haric tutulan aralarin toplami == idle",
+                       abs(sum(g["seconds"] for g in d["gap_list"]) - d["idle"]) <= 0.001,
+                       "{} ara, toplam {:.1f}s".format(len(d["gap_list"]), d["idle"])))
+    # Esik buyudukce daha az bosluk dusulur -> aktif sure monoton ARTAR.
+    ladder = [(g, compute_duration(ts, g)) for g in (60, 300, 900, 3600)]
+    mono = all(ladder[i][1]["active"] >= ladder[i - 1][1]["active"] - 0.001
+               for i in range(1, len(ladder)))
+    results.append(_ok("3e. esik buyudukce aktif sure monoton artiyor", mono,
+                       "  ".join("{}dk={}".format(g // 60, fmt_dur(r["active"]))
+                                for g, r in ladder)))
 
     print("\n-- 4. Session bulma --")
     env_sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
@@ -839,6 +872,10 @@ def main(argv=None):
                     help="bu calistirma icin plan tutarini ez")
     ap.add_argument("--set-plan", type=float, metavar="TUTAR",
                     help="config'e kalici plan tutari yaz")
+    ap.add_argument("--idle-gap", type=float, metavar="DK",
+                    help="ara esigi (dakika) - bu calistirma icin")
+    ap.add_argument("--set-idle-gap", type=float, metavar="DK",
+                    help="ara esigini (dakika) config'e kalici yaz")
     ap.add_argument("--currency", metavar="KOD",
                     help="para birimi (--set-plan ile birlikte kalici)")
     ap.add_argument("--label", metavar="AD", help="plan etiketi (Pro, Max, ...)")
@@ -850,19 +887,31 @@ def main(argv=None):
 
     config, config_path = load_config(args.config)
 
-    if args.set_plan is not None or (args.currency and args.set_plan is not None):
+    if args.set_plan is not None or args.set_idle_gap is not None:
         if args.set_plan is not None:
             config["plan"]["amount"] = float(args.set_plan)
+        if args.set_idle_gap is not None:
+            if args.set_idle_gap <= 0:
+                sys.stderr.write("HATA: --set-idle-gap sifirdan buyuk olmali.\n")
+                return 2
+            config["idle_gap_seconds"] = float(args.set_idle_gap) * 60.0
         if args.currency:
             config["plan"]["currency"] = args.currency
         if args.label:
             config["plan"]["label"] = args.label
         written = save_config(config, config_path)
         print("Config guncellendi: {}".format(written))
-        print("  plan: {} {} ({})".format(
+        print("  plan     : {} {} ({})".format(
             config["plan"]["amount"], config["plan"]["currency"],
             config["plan"].get("label", "")))
+        print("  ara esigi: {}".format(fmt_threshold(config["idle_gap_seconds"])))
         return 0
+
+    if args.idle_gap is not None:
+        if args.idle_gap <= 0:
+            sys.stderr.write("HATA: --idle-gap sifirdan buyuk olmali.\n")
+            return 2
+        config["idle_gap_seconds"] = float(args.idle_gap) * 60.0
 
     if args.plan is not None:
         config["plan"] = dict(config["plan"])

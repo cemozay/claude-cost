@@ -37,6 +37,8 @@ python scripts/claude_cost.py --month          # bu ayın özeti (tüm projeler)
 python scripts/claude_cost.py --month 2026-07  # belirli ay
 python scripts/claude_cost.py --plan 100       # plan tutarını bu çalıştırma için ez
 python scripts/claude_cost.py --set-plan 100   # config'e kalıcı yaz
+python scripts/claude_cost.py --idle-gap 10    # ara eşiğini bu çalıştırma için ez (dk)
+python scripts/claude_cost.py --set-idle-gap 10 # ara eşiğini kalıcı yaz (dk)
 python scripts/claude_cost.py --json           # makine okunur çıktı
 python scripts/claude_cost.py --selftest       # doğrulama modu
 ```
@@ -49,8 +51,12 @@ Proje:     C:\Users\cemyu  (HEAD)
 Baslangic: 16 Agustos 2026 18:34   Bitis: 18:50
 
 Sure
-  Duvar saati : 16dk 19sn
-  Aktif       : 10dk 31sn   (5dk 48sn bosluk haric, esik 5dk)
+  Duvar saati : 6sa 09dk 09sn
+  Aktif       : 27dk 26sn   (5sa 41dk 43sn bosluk haric, esik 5dk)
+    haric tutulan aralar (3 adet):
+      16 Aug 19:05   5sa 26dk 03sn
+      16 Aug 18:55        9dk 52sn
+      16 Aug 18:34        5dk 48sn
 
 Token (requestId ile tekillestirilmis, 22 istek)
   input                      43      cache write 5dk               0
@@ -66,6 +72,37 @@ B) Plan payi - Agustos 2026  (ay ici, gecici)
   Bu ay: 33 session, toplam API-karsiligi $1,572.48
   Bu session payi: %0.6  ->  $0.12 / $20.00
 ```
+
+## Molalar: `Duvar saati` vs `Aktif`
+
+Limit yediğinde, işin çıktığında ya da bilgisayarı bırakıp gittiğinde geçen süre
+**faturalanacak sürede olmamalı.** `Aktif` tam olarak bunu verir:
+
+- **Duvar saati** — ilk kayıttan son kayda kadar geçen ham süre.
+- **Aktif** — eşiği (varsayılan 5 dk) aşan her boşluk düşülmüş hali.
+  **Faturalanacak rakam budur.**
+
+Hangi araların düşüldüğü tek tek listelenir, çünkü müşteriye verilen rakamın
+savunulabilir olması gerekir. Eşik sana uymuyorsa dene:
+
+```
+python scripts/claude_cost.py --idle-gap 2     # daha sıkı: kısa duraklar da düşülür
+python scripts/claude_cost.py --idle-gap 15    # daha gevşek: sadece uzun molalar
+python scripts/claude_cost.py --set-idle-gap 10  # beğendiğini kalıcı yap
+```
+
+### Eşik neden 5 dakika?
+
+Rastgele seçilmedi, veriye bakılarak seçildi. Bu makinedeki 85 session'da
+ardışık `assistant` kayıtları arasındaki **10.811** aralık ölçüldü: en uzunu
+**2.92 dakika**, 5 dakikayı aşan **sıfır**. Yani model tek bir turda hiçbir zaman
+5 dakika sessiz kalmıyor — dolayısıyla 5 dakikalık eşik gerçek çalışmayı asla
+yanlışlıkla "mola" saymıyor. Eşiği 3 dakikanın altına çekersen bu güvence kalkar.
+
+> Boşluğun yönüne (kim son hamleyi yaptı) bakan bir sınıflandırma denendi ve
+> **çürütüldü**: `kullanıcı → model` boşluklarının süreleri 258–586 dakika
+> çıkıyor. Model 10 saat düşünmez; onlar da kullanıcı arası. Yön bilgisi mola
+> tespiti için kullanışsız, süre eşiği ise yeterli.
 
 ## İki maliyet modeli neden var?
 
