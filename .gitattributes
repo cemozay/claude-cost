@@ -1,0 +1,6 @@
+# Linux sunucusunda dogrudan calistirildiginda shebang CRLF yuzunden
+# "bad interpreter: python3^M" vermesin diye satir sonlari LF'e sabitlenir.
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
