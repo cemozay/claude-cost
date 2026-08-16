@@ -27,6 +27,7 @@ __version__ = "1.1.0"
 
 CONFIG_PATH = Path.home() / ".claude" / "cost-config.json"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
+TAGS_PATH = Path.home() / ".claude" / "cost-tags.json"
 
 # Fiyatlar config dosyasinda tutulur ki fiyat degisince kod degismesin.
 # Cache fiyatlari input fiyatinin carpani olarak hesaplanir (API'nin gercek modeli budur).
@@ -166,6 +167,62 @@ def save_config(cfg, path=None):
     with open(str(path), "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
     return path
+
+
+# ---------------------------------------------------------------- 1b. etiketler
+
+# True = dahil, False = haric, anahtar YOK = etiketsiz.
+TAG_LABELS = {True: "dahil", False: "haric", None: "etiketsiz"}
+
+
+def parse_tag_word(word):
+    """'dahil'/'haric' -> True/False. Taninmazsa None."""
+    w = (word or "").strip().lower()
+    if w in ("dahil", "include", "in"):
+        return True
+    if w in ("haric", "exclude", "out"):
+        return False
+    return None
+
+
+def load_tags(path=None):
+    """Etiket deposunu okur. Yoksa/bozuksa bos depo doner (asla coker degil)."""
+    path = Path(path) if path else TAGS_PATH
+    if not path.exists():
+        return {"version": 1, "tags": {}}
+    try:
+        with open(str(path), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write("UYARI: etiket dosyasi okunamadi ({}): {}\n".format(path, exc))
+        return {"version": 1, "tags": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("tags"), dict):
+        sys.stderr.write("UYARI: etiket dosyasi bozuk, bos kabul ediliyor: {}\n".format(path))
+        return {"version": 1, "tags": {}}
+    return data
+
+
+def save_tags(store, path=None):
+    path = Path(path) if path else TAGS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(path), "w", encoding="utf-8") as fh:
+        json.dump(store, fh, indent=2, ensure_ascii=False, sort_keys=True)
+    return path
+
+
+def get_tag(store, session_id):
+    """True=dahil, False=haric, None=etiketsiz."""
+    return store.get("tags", {}).get(session_id)
+
+
+def set_tag(store, session_id, included):
+    store.setdefault("tags", {})[session_id] = bool(included)
+    return store
+
+
+def remove_tag(store, session_id):
+    store.setdefault("tags", {}).pop(session_id, None)
+    return store
 
 
 # ---------------------------------------------------------------- 2. dosya bulma
@@ -820,6 +877,30 @@ def selftest(config, config_path):
         try:
             tmp.unlink()
             os.rmdir(tmpdir)
+        except OSError:
+            pass
+
+    print("\n-- 16. Etiket deposu --")
+    import tempfile as _tf
+    _td = _tf.mkdtemp(prefix="claude_cost_tags_")
+    _tp = Path(_td) / "tags.json"
+    try:
+        st = load_tags(_tp)
+        r16a = get_tag(st, "abc") is None
+        set_tag(st, "abc", True)
+        set_tag(st, "def", False)
+        save_tags(st, _tp)
+        st2 = load_tags(_tp)
+        r16b = get_tag(st2, "abc") is True and get_tag(st2, "def") is False
+        remove_tag(st2, "abc")
+        save_tags(st2, _tp)
+        r16c = get_tag(load_tags(_tp), "abc") is None
+        results.append(_ok("16. Etiket yaz/oku/sil turu", r16a and r16b and r16c,
+                           "yok->None, yaz/oku ayni, sil->None"))
+    finally:
+        try:
+            _tp.unlink()
+            os.rmdir(_td)
         except OSError:
             pass
 
