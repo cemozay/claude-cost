@@ -237,7 +237,12 @@ Gövdede `if args.set_idle_gap is not None:` bloğunun ardına:
                 sys.stderr.write("HATA: --set-tracking-start YYYY-MM biciminde "
                                  "olmali (ornek 2026-08).\n")
                 return 2
-            config["tracking_start_month"] = txt
+            # Kanonik bicime cevrilerek saklanir. strptime "2026-1"i de kabul
+            # eder; ham saklanirsa in_tracking_scope'un dize karsilastirmasi
+            # bozulur ("2026-08" >= "2026-1" False doner) ve oturumlar sessizce
+            # kaybolur. Global Constraint: sessizce yanlis sayi basilmaz.
+            config["tracking_start_month"] = datetime.datetime.strptime(
+                txt, "%Y-%m").strftime("%Y-%m")
 ```
 
 Ve aynı bloğun sonundaki özet çıktısına (`print("  ara esigi: ...")` altına):
