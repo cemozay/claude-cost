@@ -933,6 +933,16 @@ def selftest(config, config_path):
         and in_tracking_scope(_t_out, _c22none) is True,
         "2026-08 esigi: Agu ici -> True, Tem -> False, esik yokken -> True"))
 
+    print("\n-- 22b. Aylik kanoniklestirilmesi --")
+    _canonical = datetime.datetime.strptime("2026-1", "%Y-%m").strftime("%Y-%m")
+    _c22b = json.loads(json.dumps(config))
+    _c22b["tracking_start_month"] = _canonical
+    _t_aug = parse_ts("2026-08-15T10:00:00.000Z")
+    results.append(_ok(
+        "22b. Sifir-Padded aylar sira saglamasi (2026-1 -> 2026-01 -> Agu dahil)",
+        _canonical == "2026-01" and in_tracking_scope(_t_aug, _c22b) is True,
+        "2026-1 -> {} -> {:.1f}%".format(_canonical, 100.0 if in_tracking_scope(_t_aug, _c22b) else 0.0)))
+
     print("\n-- 10. Capraz platform (statik gozden gecirme) --")
     src = Path(__file__).read_text(encoding="utf-8")
     # Selftest'in KENDI govdesi taramadan cikarilir: asagidaki kontrollerin
@@ -1016,7 +1026,7 @@ def main(argv=None):
                 sys.stderr.write("HATA: --set-tracking-start YYYY-MM biciminde "
                                  "olmali (ornek 2026-08).\n")
                 return 2
-            config["tracking_start_month"] = txt
+            config["tracking_start_month"] = datetime.datetime.strptime(txt, "%Y-%m").strftime("%Y-%m")
         if args.currency:
             config["plan"]["currency"] = args.currency
         if args.label:
