@@ -137,6 +137,7 @@ Mevcut bayraklar korunur. Eklenenler:
 
 --tag <session-id> dahil|haric      # tek session etiketle
 --tag-project "<desen>" dahil|haric # cwd desenine uyan session'lari toplu etiketle
+--yes                               # toplu islemde onay sormadan gec (skill kullanir)
 --tag-list [--untagged]             # session'lari etiketleriyle listele
 --untag <session-id>                # etiketi kaldir (etiketsize dondur)
 
@@ -274,6 +275,53 @@ Aylık toplam artık plan tutarına çivilenmez.
 yerine sabit oranlı hesap gelir. `month_totals()` etiket kırılımı döndürecek
 şekilde genişletilir.
 
+## Etkileşim modeli — her şey skill üzerinden
+
+**Kullanıcı hiçbir zaman python komutu yazmayacak.** CLI bayrakları yalnızca
+skill'in kullandığı iç arayüzdür; kullanıcı arayüzü doğal dildir. SKILL.md
+bunu karşılamak zorunda, aksi halde tasarım kullanılamaz kalır.
+
+### Doğal dil → bayrak eşlemesi
+
+| Kullanıcı der ki | Skill çalıştırır |
+|---|---|
+| "bu session'ı dahil et" / "bu müşteri işi" | `--tag $CLAUDE_CODE_SESSION_ID dahil` |
+| "bunu sayma" / "kendi projem" | `--tag $CLAUDE_CODE_SESSION_ID haric` |
+| "etiketsizleri göster" | `--tag-list --untagged` |
+| "hepsini göster" | `--tag-list` |
+| "takibi bu aydan başlat" | `--set-tracking-start <içinde bulunulan ay>` |
+| "taban ne olsun" / "taban öner" | `--suggest-baseline` |
+| "tabanı 1250 yap" | `--set-baseline 1250` |
+| "Frames projesinin hepsi müşteri işi" | `--tag-project "*Frames*" dahil --yes` |
+| "yanlış işaretledim, geri al" | `--untag <id>` |
+
+### UUID'leri kullanıcıya yazdırmama
+
+`--tag-list` çıktısı UUID içerir ama kullanıcı onları kopyalamaz. Skill listeyi
+**numaralandırarak** sunar:
+
+```
+Etiketsiz oturumlar (2026-08):
+  1. 16 Ağu 18:34  Brainstorm superpowers…   43dk   $34,55   ~/
+  2. 15 Ağu 09:12  Frames watchlist algo     2sa    $187,20  Frames
+  3. 14 Ağu 22:05  Web refactor phases       5sa    $542,04  FramesWeb
+```
+
+Kullanıcı "1 ve 3 dahil, 2 hariç" der; skill numaraları UUID'lere çevirip
+`--tag` çağrılarını kendisi yapar. Numaralar yalnızca o listeleme içinde
+geçerlidir — skill her seferinde yeniden listeler, eski numaraya güvenmez.
+
+### Toplu işaretlemede onay
+
+`--tag-project` çok sayıda oturumu etkileyebildiği için skill **önce kaç
+oturumun etkileneceğini söyler ve kullanıcıdan onay alır**, sonra `--yes` ile
+çalıştırır. Onaysız toplu etiketleme yapılmaz.
+
+### Değişmeyen ilke
+
+Skill script çıktısını **olduğu gibi** sunar; rakamı yeniden hesaplamaz,
+yuvarlamaz, tahmin etmez. Yeni komutlar bu kuralı değiştirmez.
+
 ## Hata durumları
 
 | Durum | Davranış |
@@ -319,7 +367,9 @@ her çalıştırmada kanıtlar.
 6. Aylık raporun etiket kırılımı + kullanım oranı
 7. `--export` / `--machine` + `cost-imports/` birleştirme
 8. Selftest 16-22
-9. README + SKILL.md güncelle, sürüm 2.0.0
+9. **SKILL.md — doğal dil eşlemesi, numaralı listeleme, toplu onay akışı.**
+   Kullanıcı python komutu yazmayacak; bu adım isteğe bağlı değil.
+10. README güncelle, sürüm 2.0.0
 
 Adım 1-6 tek makinede çalışan bitmiş bir ürün verir; 7 kapsamı genişletir.
 
