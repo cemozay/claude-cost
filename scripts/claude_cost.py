@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import datetime
+import fnmatch
 
 from pathlib import Path
 
@@ -1106,6 +1107,10 @@ def main(argv=None):
                     help="session'lari etiketleriyle listele")
     ap.add_argument("--untagged", action="store_true",
                     help="--tag-list ile: yalnizca etiketsizleri goster")
+    ap.add_argument("--tag-project", nargs=2, metavar=("DESEN", "dahil|haric"),
+                    help="cwd desenine uyan session'lari toplu etiketle")
+    ap.add_argument("--yes", action="store_true",
+                    help="toplu islemde onay sorma")
     ap.add_argument("--currency", metavar="KOD",
                     help="para birimi (--set-plan ile birlikte kalici)")
     ap.add_argument("--label", metavar="AD", help="plan etiketi (Pro, Max, ...)")
@@ -1189,6 +1194,37 @@ def main(argv=None):
         remove_tag(store, args.untag)
         save_tags(store)
         print("Etiket kaldirildi: {} -> etiketsiz".format(args.untag))
+        return 0
+
+    if args.tag_project:
+        desen, word = args.tag_project
+        included = parse_tag_word(word)
+        if included is None:
+            sys.stderr.write("HATA: etiket 'dahil' veya 'haric' olmali "
+                             "('{}' verildi).\n".format(word))
+            return 2
+        # fnmatch buyuk/kucuk harf duyarsiz karsilastirilir: Windows yollari icin sart.
+        d = desen.lower()
+        hedef = [s for s in collect_sessions(config)
+                 if s["cwd"] and fnmatch.fnmatch(s["cwd"].lower(), d)]
+        if not hedef:
+            print("Desene uyan session yok: {}".format(desen))
+            return 0
+        print("{} session '{}' olarak etiketlenecek:".format(
+            len(hedef), TAG_LABELS[included]))
+        for s in hedef[:5]:
+            print("  {}  {}".format(to_local(s["start"]).strftime("%d %b %H:%M"),
+                                    (s["title"] or s["session_id"])[:44]))
+        if len(hedef) > 5:
+            print("  ... {} tane daha".format(len(hedef) - 5))
+        if not args.yes:
+            sys.stderr.write("Onay gerekli: ayni komutu --yes ile calistirin.\n")
+            return 3
+        store = load_tags()
+        for s in hedef:
+            set_tag(store, s["session_id"], included)
+        save_tags(store)
+        print("{} session etiketlendi.".format(len(hedef)))
         return 0
 
     if args.tag_list:
