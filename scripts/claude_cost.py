@@ -740,7 +740,6 @@ def render_text(report):
         mk = m["month"]
         y, mo = mk.split("-")
         etiket = "  (ay ici, gecici)" if is_current_month(mk) else ""
-        plan = report["plan"]
         L.append("{} {}{}".format(TR_MONTHS[int(mo)], y, etiket))
         L.append("")
         L.append("  Dahil     : {:>3} session   {:>10}".format(
