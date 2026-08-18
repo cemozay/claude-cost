@@ -259,17 +259,25 @@ def remove_tag(store, session_id):
 
 # ---------------------------------------------------------------- 2. dosya bulma
 
-def find_session_file(session_id=None):
+def find_session_file(session_id=None, strict=False):
     """Sirayla: --session argumani -> CLAUDE_CODE_SESSION_ID -> en yeni .jsonl.
 
     Proje slug'i cwd'den TURETILMEZ: Windows yol -> slug donusumu belirsiz ve
     kirilgan. Dosya dogrudan projects/*/<session-id>.jsonl glob'u ile aranir.
+
+    strict=True: session_id ACIKCA verildi (ör. --session) ve bulunamadi.
+    Boyle bir durumda en-yeni dosyaya SESSIZCE duselinmez - cagiran (main)
+    bunu ("gecersiz", None) olarak gorup HATA ile durmali. Fallback yalnizca
+    session_id hic verilmediginde (ör. yalnizca env degiskeni ya da hicbiri)
+    dogrudur.
     """
     sid = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if sid:
         matches = sorted(PROJECTS_DIR.glob("*/{}.jsonl".format(sid)))
         if matches:
             return matches[0], "session-id"
+        if strict:
+            return None, "gecersiz"
         sys.stderr.write("UYARI: '{}' icin transcript bulunamadi; en yeni dosyaya "
                          "duseluyor.\n".format(sid))
 
@@ -613,13 +621,28 @@ def load_imported_sessions_from(directory, tags):
         makine = data.get("machine") or fp.stem
         for e in data.get("sessions") or []:
             sid = e.get("session_id")
-            if not sid or sid in seen:
+            if not sid:
+                sys.stderr.write(
+                    "UYARI: import kaydinda session_id yok, atlandi: {}\n"
+                    .format(fp.name))
                 continue
-            seen.add(sid)
+            if sid in seen:
+                continue
+
+            # parse_ts() bozuk/ayristirilamayan bir zaman damgasinda None
+            # doner, ama "Z"siz naif bir damga ('2026-08-15T10:00:00') GECERLI
+            # bir datetime uretir - sadece tzinfo'su yok. Yerel session'lar
+            # HER ZAMAN aware (parse_ts 'Z' -> '+00:00' cevirir), bu yuzden
+            # naif bir import kaydi collect_sessions'ta sort() sirasinda
+            # "can't compare offset-naive and offset-aware datetimes" ile
+            # coker. None kadar acikca reddedilmeli.
             start = parse_ts(e.get("start"))
-            end = parse_ts(e.get("end"))
-            if start is None:
+            if start is None or start.tzinfo is None:
+                sys.stderr.write(
+                    "UYARI: import kaydinda gecersiz/naif baslangic zamani, "
+                    "atlandi: {} session={}\n".format(fp.name, sid))
                 continue
+            end = parse_ts(e.get("end"))
             try:
                 entry = {
                     "session_id": sid, "title": e.get("title"), "cwd": e.get("cwd"),
@@ -638,23 +661,28 @@ def load_imported_sessions_from(directory, tags):
                     "UYARI: import kaydi bozuk, atlandi: {} session={} ({})\n"
                     .format(fp.name, sid, exc))
                 continue
+            # seen'e ancak GECERLILIK dogrulamasindan sonra eklenir: bozuk bir
+            # kayit, ayni session'in baska bir dosyadaki gecerli kopyasini
+            # bastirmasin.
+            seen.add(sid)
             out.append(entry)
     return out
 
 
-def month_totals(month, config, quiet=True):
+def month_totals(month, config, quiet=True, tags=None):
     """Ay ozetini etiket kirilimiyla dondurur.
 
     Session'lar BASLANGIC ayina gore gruplanir. Tum projeler ve (varsa)
     import edilmis makineler dahildir.
     """
-    sessions = [s for s in collect_sessions(config, quiet=quiet)
+    sessions = [s for s in collect_sessions(config, tags=tags, quiet=quiet)
                 if month_key(s["start"]) == month]
     dahil = [s for s in sessions if s["tag"] is True]
     haric = [s for s in sessions if s["tag"] is False]
     etiketsiz = [s for s in sessions if s["tag"] is None]
 
     dahil_cost = sum(s["cost"] for s in dahil)
+    tracking_start = config.get("tracking_start_month")
     out = {
         "month": month,
         "dahil": dahil, "haric": haric, "etiketsiz": etiketsiz,
@@ -664,18 +692,24 @@ def month_totals(month, config, quiet=True):
         "tum_cost": sum(s["cost"] for s in sessions),
         "utilization": None, "plan_cost": None, "baseline": None,
         "baseline_error": None,
+        # Ay hic session icermiyorsa (kapsamin disinda ya da henuz veri yok)
+        # rapor katmani (render_text) sayi basmaz - bkz. asagidaki has_sessions.
+        "has_sessions": bool(sessions),
+        "before_tracking": bool(tracking_start) and month < tracking_start,
+        "tracking_start_month": tracking_start,
     }
-    try:
-        fc = fixed_plan_cost(dahil_cost, config)
-        out["utilization"] = fc["ratio"]
-        out["plan_cost"] = fc["amount"]
-        out["baseline"] = fc["baseline"]
-    except BaselineNotSetError as exc:
-        out["baseline_error"] = str(exc)
+    if sessions:
+        try:
+            fc = fixed_plan_cost(dahil_cost, config)
+            out["utilization"] = fc["ratio"]
+            out["plan_cost"] = fc["amount"]
+            out["baseline"] = fc["baseline"]
+        except BaselineNotSetError as exc:
+            out["baseline_error"] = str(exc)
     return out
 
 
-# ---------------------------------------------------------------- 7. plan payi
+# ---------------------------------------------------------------- 7. sabit oranli plan maliyeti
 
 class BaselineNotSetError(Exception):
     """Taban set edilmemis. Rapor sayi uydurmaz, durur."""
@@ -710,9 +744,9 @@ def fixed_plan_cost(session_cost, config):
             "baseline": baseline}
 
 
-def suggest_baseline_text(config):
+def suggest_baseline_text(config, tags=None):
     """Yalnizca TAVSIYE. Hicbir sey yazmaz."""
-    sessions = collect_sessions(config)
+    sessions = collect_sessions(config, tags=tags)
     now = datetime.datetime.now()
     mk = now.strftime("%Y-%m")
     dahil = [s for s in sessions if s["tag"] is True and month_key(s["start"]) == mk]
@@ -808,7 +842,11 @@ def render_text(report):
 
         plan = report["plan"]
         L.append("B) Plan maliyeti (sabit oran)")
-        if report.get("tag") is False:
+        if not report.get("in_scope", True):
+            L.append("  Bu session takip baslangicinin ({}) disinda kaliyor - "
+                     "kapsam disi, plan maliyeti hesaplanmadi.".format(
+                         report.get("tracking_start_month") or "?"))
+        elif report.get("tag") is False:
             L.append("  Bu session HARIC tutulmus - plan maliyetine katilmiyor.")
         elif report.get("tag") is None:
             L.append("  Bu session ETIKETSIZ - plan maliyeti hesaplanmadi.")
@@ -825,8 +863,9 @@ def render_text(report):
                      "durum: fixed_cost eksik). Rakam basilmadi.")
         else:
             fc = report["fixed_cost"]
-            src = report.get("baseline_source") or {}
-            not_ = src.get("set_at", "")[:10]
+            src = report.get("baseline_source")
+            src = src if isinstance(src, dict) else {}
+            not_ = str(src.get("set_at") or "")[:10]
             L.append("  Taban          : {}/ay{}".format(
                 fmt_money(fc["baseline"], cur),
                 "   ({} tarihinde elle konuldu)".format(not_) if not_ else ""))
@@ -842,22 +881,31 @@ def render_text(report):
         etiket = "  (ay ici, gecici)" if is_current_month(mk) else ""
         L.append("{} {}{}".format(TR_MONTHS[int(mo)], y, etiket))
         L.append("")
-        L.append("  Dahil     : {:>3} session   {:>10}".format(
-            len(m["dahil"]), fmt_money(m["dahil_cost"], cur)))
-        if m["baseline_error"]:
-            L.append("  {}".format(m["baseline_error"]))
+        if not m.get("has_sessions"):
+            # Kapsam disi/veri yok: sifir bir rakam degildir, ayri bir durum -
+            # "kullanim %0.0" ile karistirilmasin (bkz. governing rule).
+            if m.get("before_tracking"):
+                L.append("  Bu ay icin session yok - takip baslangicindan "
+                         "({}) once.".format(m.get("tracking_start_month")))
+            else:
+                L.append("  Bu ay icin izlenen session yok.")
         else:
-            L.append("  Taban     : {}/ay  ->  kullanim %{:.1f}  ->  "
-                     "plan maliyeti {}".format(
-                         fmt_money(m["baseline"], cur),
-                         m["utilization"] * 100.0,
-                         fmt_money(m["plan_cost"], cur)))
-        if m["etiketsiz"]:
-            L.append("  Etiketsiz : {:>3} session   {:>10}   (hesaba KATILMADI)".format(
-                len(m["etiketsiz"]), fmt_money(m["etiketsiz_cost"], cur)))
-        if m["haric"]:
-            L.append("  Haric     : {:>3} session   {:>10}".format(
-                len(m["haric"]), fmt_money(m["haric_cost"], cur)))
+            L.append("  Dahil     : {:>3} session   {:>10}".format(
+                len(m["dahil"]), fmt_money(m["dahil_cost"], cur)))
+            if m["baseline_error"]:
+                L.append("  {}".format(m["baseline_error"]))
+            else:
+                L.append("  Taban     : {}/ay  ->  kullanim %{:.1f}  ->  "
+                         "plan maliyeti {}".format(
+                             fmt_money(m["baseline"], cur),
+                             m["utilization"] * 100.0,
+                             fmt_money(m["plan_cost"], cur)))
+            if m["etiketsiz"]:
+                L.append("  Etiketsiz : {:>3} session   {:>10}   (hesaba KATILMADI)".format(
+                    len(m["etiketsiz"]), fmt_money(m["etiketsiz_cost"], cur)))
+            if m["haric"]:
+                L.append("  Haric     : {:>3} session   {:>10}".format(
+                    len(m["haric"]), fmt_money(m["haric_cost"], cur)))
 
     if report.get("unknown_models"):
         L.append("")
@@ -944,10 +992,13 @@ def build_session_report(path, config, config_path, tags=None):
         tags = load_tags()
     report["tag"] = get_tag(tags, report["session"]["session_id"])
     report["in_scope"] = in_tracking_scope(duration["start"], config)
+    report["tracking_start_month"] = config.get("tracking_start_month")
 
     report["fixed_cost"] = None
     report["baseline_error"] = None
-    if report["tag"] is True:
+    # Kapsam disi bir session icin fixed_cost HESAPLANMAZ - --json ciktisi
+    # da render_text ile ayni kurala uysun (bkz. in_scope kontrolu yukarida).
+    if report["tag"] is True and report["in_scope"]:
         try:
             report["fixed_cost"] = fixed_plan_cost(priced["total_cost"], config)
         except BaselineNotSetError as exc:
@@ -955,8 +1006,8 @@ def build_session_report(path, config, config_path, tags=None):
     return report
 
 
-def build_month_report(month, config, config_path):
-    totals = month_totals(month, config)
+def build_month_report(month, config, config_path, tags=None):
+    totals = month_totals(month, config, tags=tags)
     unknown = set()
     for grup in (totals["dahil"], totals["haric"], totals["etiketsiz"]):
         for s in grup:
@@ -1078,6 +1129,32 @@ def selftest(config, config_path):
         if saved is not None:
             os.environ["CLAUDE_CODE_SESSION_ID"] = saved
 
+    print("\n-- 26. Bilinmeyen --session sessizce en-yeniye dusmuyor --")
+    # Eskiden find_session_file() aciklikca verilen ama bulunamayan bir
+    # --session icin stderr'e UYARI yazip en YENI transcript'e duseluyordu;
+    # main() da bunu tam bir rapor olarak basiyordu - stdout'ta hicbir isaret
+    # olmadan BASKA bir session'in raporu goruluyordu. strict=True artik bu
+    # durumda ("gecersiz", None) donduruyor ve main() HATA ile durup exit 2
+    # veriyor, fallback yapmiyor.
+    import io as _io26
+    import contextlib as _ctx26
+    _f26, _how26 = find_session_file("KESINLIKLE-VAR-OLMAYAN-BIR-UUID-26",
+                                     strict=True)
+    _r26_func = _f26 is None and _how26 == "gecersiz"
+
+    _out26 = _io26.StringIO()
+    _err26 = _io26.StringIO()
+    with _ctx26.redirect_stdout(_out26), _ctx26.redirect_stderr(_err26):
+        _rc26 = main(["--session", "KESINLIKLE-VAR-OLMAYAN-BIR-UUID-26"])
+    _r26_main = (_rc26 == 2 and _out26.getvalue() == ""
+                and "HATA" in _err26.getvalue())
+    results.append(_ok(
+        "26. --session bilinmeyen id icin HATA ile durur, baska session'a "
+        "sessizce dusmez",
+        _r26_func and _r26_main,
+        "find_session_file={}/{}  main() cikis={} stdout-bos={} HATA-var={}".format(
+            _f26, _how26, _rc26, _out26.getvalue() == "", "HATA" in _err26.getvalue())))
+
     print("\n-- 5. Fiyatlama (elle carpimla karsilastirma) --")
     priced = price_requests(parsed["requests"], config)
     mult = config["cache_multipliers"]
@@ -1130,33 +1207,111 @@ def selftest(config, config_path):
     _c7["baseline_monthly_api_cost"] = 1000.0
     _c7["plan"] = {"amount": 20.0, "currency": "USD", "label": "Pro"}
     mt = month_totals(mk, _c7)
-    _toplam_ayri7 = abs((mt["dahil_cost"] + mt["haric_cost"] + mt["etiketsiz_cost"])
-                        - mt["tum_cost"]) < 0.01
-    _beklenen_oran7 = mt["dahil_cost"] / 1000.0
-    _beklenen_tutar7 = _beklenen_oran7 * 20.0
-    results.append(_ok(
-        "7. Aylik dahil toplami tabana bolunup dogru kullanim orani/plan "
-        "maliyeti uretiyor",
-        mt["dahil_cost"] > 0  # sifirsa oran/tutar karsilastirmalari 0==0 olur, anlamsizlasir
-        and mt["baseline_error"] is None
-        and abs(mt["utilization"] - _beklenen_oran7) < 1e-9
-        and abs(mt["plan_cost"] - _beklenen_tutar7) < 1e-9
-        and _toplam_ayri7,
-        "{} dahil session, dahil_cost {} -> kullanim %{:.1f}".format(
-            len(mt["dahil"]), fmt_money(mt["dahil_cost"]), mt["utilization"] * 100.0)))
+    # Taze bir makinede (henuz cost-tags.json yok) bu ay icin dahil-etiketli
+    # session bulunmayabilir; o zaman oran/tutar karsilastirmalari 0==0 olur
+    # ve kontrol ANLAMSIZLASIR - check 6'nin izledigi orunek gibi bu FAIL
+    # DEGIL SKIP olmali (onceden `mt["dahil_cost"] > 0` sarti dogrudan
+    # sonuc booleanina karisiyordu ve taze makinede kirmizi bir FAIL basiyordu).
+    if mt["dahil_cost"] > 0:
+        _toplam_ayri7 = abs((mt["dahil_cost"] + mt["haric_cost"] + mt["etiketsiz_cost"])
+                            - mt["tum_cost"]) < 0.01
+        _beklenen_oran7 = mt["dahil_cost"] / 1000.0
+        _beklenen_tutar7 = _beklenen_oran7 * 20.0
+        results.append(_ok(
+            "7. Aylik dahil toplami tabana bolunup dogru kullanim orani/plan "
+            "maliyeti uretiyor",
+            mt["baseline_error"] is None
+            and abs(mt["utilization"] - _beklenen_oran7) < 1e-9
+            and abs(mt["plan_cost"] - _beklenen_tutar7) < 1e-9
+            and _toplam_ayri7,
+            "{} dahil session, dahil_cost {} -> kullanim %{:.1f}".format(
+                len(mt["dahil"]), fmt_money(mt["dahil_cost"]), mt["utilization"] * 100.0)))
+    else:
+        print("[SKIP] 7. Aylik dahil toplami tabana bolunup dogru kullanim "
+             "orani/plan maliyeti uretiyor  (bu ay icin dahil-etiketli "
+             "session yok)")
 
     print("\n-- 8. Plan override (aylik) --")
     _c8 = json.loads(json.dumps(_c7))
     _c8["plan"]["amount"] = _c7["plan"]["amount"] * 5
     mt5 = month_totals(mk, _c8)
+    # 7 gibi: dahil_cost 0 ise mt["utilization"] None kalir (month_totals
+    # "has_sessions" yoksa/ dahil bos oldugunda taban hesaplamaz), bu
+    # kontrolun onkosulu bostur - SKIP.
+    if mt["dahil_cost"] > 0:
+        results.append(_ok(
+            "8. Plan 5x iken kullanim orani sabit, plan maliyeti 5x",
+            mt["baseline_error"] is None and mt5["baseline_error"] is None
+            and abs(mt["utilization"] - mt5["utilization"]) < 1e-9
+            and abs(mt5["plan_cost"] - mt["plan_cost"] * 5) < 1e-9,
+            "oran %{:.1f} sabit, tutar {} -> {}".format(
+                mt["utilization"] * 100.0, fmt_money(mt["plan_cost"]),
+                fmt_money(mt5["plan_cost"]))))
+    else:
+        print("[SKIP] 8. Plan 5x iken kullanim orani sabit, plan maliyeti 5x "
+             "(bu ay icin dahil-etiketli session yok, check 7'nin onkosulu)")
+
+    print("\n-- 24. --month gecersiz/dolgulanmamis deger kanoniklestirilir ya da reddedilir --")
+    # '--month 2026-8' (dolgusuz) eskiden month_key(s["start"]) == "2026-8"
+    # dize karsilastirmasinda HICBIR session'a eslesmiyordu ve sessizce "0
+    # session $0.00" basiyordu - governing rule'un tam ihlali. Simdi
+    # strptime("%Y-%m") ile kanoniklestiriliyor; ayristirilamayan (kelime)
+    # ya da gecersiz (ay 13) deger acik HATA + exit 2 ile reddediliyor.
+    import io as _io24
+    import contextlib as _ctx24
+    _out24a = _io24.StringIO()
+    with _ctx24.redirect_stdout(_out24a):
+        _rc24a = main(["--month", "2026-8"])
+    _out24b = _io24.StringIO()
+    with _ctx24.redirect_stdout(_out24b):
+        _rc24b = main(["--month", "2026-08"])
+    _r24_pad = (_rc24a == 0 and _rc24a == _rc24b
+               and _out24a.getvalue() == _out24b.getvalue())
+
+    _err24c = _io24.StringIO()
+    with _ctx24.redirect_stdout(_io24.StringIO()), _ctx24.redirect_stderr(_err24c):
+        _rc24c = main(["--month", "temmuz"])
+    _r24_word = _rc24c == 2 and "HATA" in _err24c.getvalue()
+
+    _err24d = _io24.StringIO()
+    with _ctx24.redirect_stdout(_io24.StringIO()), _ctx24.redirect_stderr(_err24d):
+        _rc24d = main(["--month", "2026-13"])
+    _r24_range = _rc24d == 2 and "HATA" in _err24d.getvalue()
+
     results.append(_ok(
-        "8. Plan 5x iken kullanim orani sabit, plan maliyeti 5x",
-        mt["baseline_error"] is None and mt5["baseline_error"] is None
-        and abs(mt["utilization"] - mt5["utilization"]) < 1e-9
-        and abs(mt5["plan_cost"] - mt["plan_cost"] * 5) < 1e-9,
-        "oran %{:.1f} sabit, tutar {} -> {}".format(
-            mt["utilization"] * 100.0, fmt_money(mt["plan_cost"]),
-            fmt_money(mt5["plan_cost"]))))
+        "24. --month YYYY-M -> YYYY-MM kanoniklestirilir; kelime/gecersiz ay "
+        "HATA ile reddedilir",
+        _r24_pad and _r24_word and _r24_range,
+        "2026-8==2026-08 ciktisi ayni={} | 'temmuz' cikis={} | '2026-13' cikis={}".format(
+            _r24_pad, _rc24c, _rc24d)))
+
+    print("\n-- 25. Kapsam disi/veri-siz ay sessiz sifir yerine acik mesaj veriyor --")
+    # Takip baslangicindan once ya da hic verinin olmadigi gelecek bir ay
+    # eskiden "Dahil: 0 session $0.00 / kullanim %0.0" basiyordu - bu, gercek
+    # bir %0.0 kullanim sinyaliyle AYIRT EDILEMEZ sahte bir rakamdi.
+    _c25 = json.loads(json.dumps(config))
+    _c25["tracking_start_month"] = "2026-08"
+    _bos_depo25 = {"version": 1, "tags": {}}
+    _mt25_before = month_totals("2026-05", _c25, tags=_bos_depo25)
+    _mt25_future = month_totals("2027-01", _c25, tags=_bos_depo25)
+    _r25_before = (not _mt25_before["has_sessions"]) and _mt25_before["before_tracking"] is True
+    _r25_future = (not _mt25_future["has_sessions"]) and _mt25_future["before_tracking"] is False
+
+    _txt25_before = render_text(build_month_report(
+        "2026-05", _c25, config_path, tags=_bos_depo25))
+    _txt25_future = render_text(build_month_report(
+        "2027-01", _c25, config_path, tags=_bos_depo25))
+    _r25_txt_before = ("%0.0" not in _txt25_before and "$0.00" not in _txt25_before
+                       and "once" in _txt25_before.lower())
+    _r25_txt_future = "%0.0" not in _txt25_future and "$0.00" not in _txt25_future
+
+    results.append(_ok(
+        "25. Session'siz ay 'kullanim %0.0' yerine acik 'session yok' mesaji basiyor",
+        _r25_before and _r25_future and _r25_txt_before and _r25_txt_future,
+        "takip-oncesi: has_sessions={} before_tracking={} | gelecek: "
+        "has_sessions={} before_tracking={}".format(
+            _mt25_before["has_sessions"], _mt25_before["before_tracking"],
+            _mt25_future["has_sessions"], _mt25_future["before_tracking"])))
 
     print("\n-- 9. Bozuk veri dayanikliligi --")
     import tempfile
@@ -1283,6 +1438,12 @@ def selftest(config, config_path):
     _c19b = json.loads(json.dumps(config))
     _c19b["baseline_monthly_api_cost"] = 1000.0
     _c19b["plan"] = {"amount": 20.0, "currency": "USD", "label": "Pro"}
+    # Bu grup (19b/19c/19e) etiket/taban KABLOLAMASINI test ediyor, takip
+    # kapsamini degil - "biggest" hangi ayda baslarsa baslasin in_scope hep
+    # True olsun diye kapsam sinirini kaldiriyoruz (aksi halde gercek
+    # config'in tracking_start_month'u yuzunden kapsam disi mesaji araya
+    # girer ve bu grubun kontrolleri gercek veriye bagimli hale gelir).
+    _c19b["tracking_start_month"] = None
     _path19b = biggest
     _probe19b = build_session_report(_path19b, _c19b, config_path,
                                      tags={"version": 1, "tags": {}})
@@ -1385,6 +1546,29 @@ def selftest(config, config_path):
         except OSError:
             pass
 
+    print("\n-- 28. baseline_source dict olmayan bir deger tasirsa cokmuyor --")
+    # Elle duzenlenmis config'te baseline_source hatali sekilde string olabilir
+    # (ör. "elle yazdim"). render_text eskiden `src.get("set_at", "")` cagirirken
+    # AttributeError ile cokerdi - salt gosterge amacli bir alan icin TUM
+    # /cost yolunu goturuyordu (governing rule ihlali degil ama coken bir
+    # dereferans, yanlis rakamdan farksiz derecede kotu).
+    _c28 = json.loads(json.dumps(_c19b))
+    _c28["baseline_source"] = "elle yazdim"
+    _coktu28 = False
+    _txt28 = ""
+    try:
+        _txt28 = render_text(build_session_report(
+            _path19b, _c28, config_path, tags=_store19b(True)))
+    except Exception as _e28:
+        _coktu28 = True
+        _txt28 = "COKTU: {!r}".format(_e28)
+    _r28 = (not _coktu28) and "[SABIT]" in _txt28
+    results.append(_ok(
+        "28. baseline_source dict olmayan (string) bir deger tasirsa "
+        "render_text cokmuyor",
+        _r28,
+        "coktu={} [SABIT]-var={}".format(_coktu28, "[SABIT]" in _txt28)))
+
     print("\n-- 19d. --tags/--config main() uctan uca --")
     # Onceki bir duzeltme build_session_report'a tags= parametresini gecirdi
     # ve main() bunu load_tags(args.tags) ile besledi (--tags eskiden session
@@ -1449,6 +1633,46 @@ def selftest(config, config_path):
             _coktu19e, "[SABIT]" not in _txt19e,
             "fixed_cost eksik" in _txt19e)))
 
+    print("\n-- 27. --tags month_totals/suggest_baseline_text uctan uca (main()) --")
+    # 19d bunu yalnizca build_session_report icin dogruladi. month_totals ve
+    # suggest_baseline_text de collect_sessions(config) cagirirken tags=
+    # GECIRMIYORDU - --month/--suggest-baseline --tags ile calistirildiginda
+    # gercek ~/.claude/cost-tags.json okunuyordu, kullanicinin verdigi depo
+    # sessizce yok sayiliyordu (34 gercek dahil kaydi varken bos depo hala
+    # 34 dahil session gosterirdi).
+    import tempfile as _tf27
+    _td27 = _tf27.mkdtemp(prefix="claude_cost_month_tags_")
+    _tp27_tags = Path(_td27) / "tags.json"
+    try:
+        save_tags({"version": 1, "tags": {}}, _tp27_tags)  # bos, gercek depodan FARKLI
+        _mk27 = datetime.datetime.now().strftime("%Y-%m")
+
+        _out27a = _io26.StringIO()
+        with _ctx26.redirect_stdout(_out27a):
+            _rc27a = main(["--month", _mk27, "--tags", str(_tp27_tags)])
+        _txt27a = _out27a.getvalue()
+        _r27_month = "Dahil     :   0 session" in _txt27a
+
+        _out27b = _io26.StringIO()
+        with _ctx26.redirect_stdout(_out27b):
+            _rc27b = main(["--suggest-baseline", "--tags", str(_tp27_tags)])
+        _txt27b = _out27b.getvalue()
+        _r27_suggest = "0 session   $0.00" in _txt27b
+
+        results.append(_ok(
+            "27. --month ve --suggest-baseline bos --tags deposunu okuyor "
+            "(gercek depoyu degil)",
+            _rc27a == 0 and _rc27b == 0 and _r27_month and _r27_suggest,
+            "month-cikis={} dahil-0-satiri-var={} | suggest-cikis={} "
+            "0-session-satiri-var={}".format(
+                _rc27a, _r27_month, _rc27b, _r27_suggest)))
+    finally:
+        try:
+            _tp27_tags.unlink()
+            os.rmdir(_td27)
+        except OSError:
+            pass
+
     print("\n-- 20. Etiketsiz izolasyonu --")
     _mk20 = datetime.datetime.now().strftime("%Y-%m")
     _mt20 = month_totals(_mk20, config)
@@ -1456,11 +1680,32 @@ def selftest(config, config_path):
                          + _mt20["etiketsiz_cost"])
                         - _mt20["tum_cost"]) < 0.01)
     _etiketsiz_haric = all(s["tag"] is True for s in _mt20["dahil"])
+
+    # Yukaridaki `all(s["tag"] is True for s in _mt20["dahil"])` filtrenin
+    # KENDISINI (month_totals'taki `if s["tag"] is True`) tekrar ediyor - eger
+    # filtre `if s["tag"]` gibi truthy bir kontrole zayiflatilsa BU KONTROL
+    # HALA GECER, cunku _mt20["dahil"]'in kendisi zaten yalnizca (zayiflamis
+    # filtreyle de) True degerli session'lari icerir ve tekrar dogrulanir.
+    # Gercek regresyonu yakalamak icin load_tags() sanitizasyonunu ATLAYAN
+    # HAM bir depo (int 1, bool degil) dogrudan month_totals'a veriliyor ve
+    # o session'in dahil listesine GIRMEDIGI ayrica dogrulaniyor.
+    _local20 = collect_sessions(config)
+    if _local20:
+        _probe20 = _local20[0]
+        _sid20 = _probe20["session_id"]
+        _ham_store20 = {"version": 1, "tags": {_sid20: 1}}
+        _mt20b = month_totals(month_key(_probe20["start"]), config, tags=_ham_store20)
+        _truthy_disinda20 = _sid20 not in [s["session_id"] for s in _mt20b["dahil"]]
+    else:
+        _truthy_disinda20 = True  # test kosulamadi, ama diger kosullari engelleme
+
     results.append(_ok(
-        "20. Etiketsizler dahil toplamina girmiyor, ayri sayiliyor",
-        _toplam_ayri and _etiketsiz_haric,
-        "dahil {} / haric {} / etiketsiz {}".format(
-            len(_mt20["dahil"]), len(_mt20["haric"]), len(_mt20["etiketsiz"]))))
+        "20. Etiketsizler dahil toplamina girmiyor, ayri sayiliyor "
+        "(ve truthy-ama-bool-olmayan bir etiket dahil sayilmiyor)",
+        _toplam_ayri and _etiketsiz_haric and _truthy_disinda20,
+        "dahil {} / haric {} / etiketsiz {}  |  ham-int-1-etiket dahil-disi={}".format(
+            len(_mt20["dahil"]), len(_mt20["haric"]), len(_mt20["etiketsiz"]),
+            _truthy_disinda20)))
 
     print("\n-- 17/18. Export-import turu ve tekillestirme --")
     import tempfile as _tf2
@@ -1653,6 +1898,93 @@ def selftest(config, config_path):
         except OSError:
             pass
 
+    print("\n-- 17d. Naif zaman damgali import kaydi coker degil, atlanir+uyarilir --")
+    # parse_ts() 'Z'siz bir damgada ('2026-08-15T10:00:00') None DEGIL, naif
+    # (tzinfo=None) bir datetime doner - eskiden bu, entry dogrulamasindan
+    # GECIYORDU ve collect_sessions'ta yerel (aware) session'larla birlikte
+    # sort() edilirken "can't compare offset-naive and offset-aware
+    # datetimes" ile TUM raporu goturuyordu. Ayni sid ile once bozuk (naif),
+    # sonra gecerli bir kopya iki AYRI dosyada veriliyor: dosyalar alfabetik
+    # sirayla islendigi icin (a_naif once, b_iyi sonra) seen.add()'in
+    # dogrulama SONRASINA tasinmasi da burada dolayli olarak sinaniyor -
+    # eski kodda naif kayit sid'i erken 'seen'e eklerdi ve gecerli kopya
+    # sessizce ATLANIRDI.
+    import tempfile as _tf17d
+    import io as _io17d
+    _id17d = Path(_tf17d.mkdtemp(prefix="claude_cost_naif_"))
+    try:
+        _sid17d = "NAIVE-TEST-SESSION-ID-17D"
+        _now17d = datetime.datetime.now(datetime.timezone.utc)
+        _bad_payload17d = {
+            "version": EXPORT_VERSION, "machine": "naif-makine",
+            "exported_at": _now17d.isoformat(),
+            "sessions": [{
+                "session_id": _sid17d,
+                "start": "2026-08-15T10:00:00",  # naif: offset/Z yok
+                "end": "2026-08-15T10:05:00",
+                "active_seconds": 60.0, "wall_seconds": 60.0,
+                "cwd": "/naif", "gitBranch": None, "title": "naif",
+                "request_count": 1, "tokens": {}, "cost": 3.0,
+                "unknown_models": [],
+            }],
+        }
+        with open(str(_id17d / "a_naif.json"), "w", encoding="utf-8") as _fh17d:
+            json.dump(_bad_payload17d, _fh17d)
+        _good_payload17d = {
+            "version": EXPORT_VERSION, "machine": "iyi-makine",
+            "exported_at": _now17d.isoformat(),
+            "sessions": [{
+                "session_id": _sid17d,
+                "start": _now17d.isoformat(),
+                "end": (_now17d + datetime.timedelta(minutes=5)).isoformat(),
+                "active_seconds": 90.0, "wall_seconds": 90.0,
+                "cwd": "/iyi", "gitBranch": None, "title": "iyi",
+                "request_count": 1, "tokens": {}, "cost": 5.0,
+                "unknown_models": [],
+            }],
+        }
+        with open(str(_id17d / "b_iyi.json"), "w", encoding="utf-8") as _fh17d:
+            json.dump(_good_payload17d, _fh17d)
+
+        _stderr17d = sys.stderr
+        sys.stderr = _io17d.StringIO()
+        _crashed17d = False
+        _merged17d = []
+        # IMPORTS_DIR zaten 17b'de `global IMPORTS_DIR` ile bildirildi (bu
+        # fonksiyonun geri kalani icin de gecerli) - burada TEKRAR bildirmek
+        # "used prior to global declaration" SyntaxError'una yol acar.
+        _orig_imports17d = IMPORTS_DIR
+        IMPORTS_DIR = _id17d
+        try:
+            try:
+                _merged17d = collect_sessions(config, load_tags(), quiet=True,
+                                              include_imports=True)
+            except Exception:
+                _crashed17d = True
+        finally:
+            IMPORTS_DIR = _orig_imports17d
+            _warned17d = sys.stderr.getvalue()
+            sys.stderr = _stderr17d
+
+        _by_id17d = dict((s["session_id"], s) for s in _merged17d)
+        _survived17d = (_sid17d in _by_id17d
+                        and abs(_by_id17d[_sid17d]["cost"] - 5.0) < 0.01
+                        and _by_id17d[_sid17d]["machine"] == "iyi-makine")
+        _warned_ok17d = "UYARI" in _warned17d and _sid17d in _warned17d
+        results.append(_ok(
+            "17d. Naif zaman damgali import kaydi coker degil, atlanir+uyarilir, "
+            "gecerli kopya hayatta kalir",
+            (not _crashed17d) and _survived17d and _warned_ok17d,
+            "coktu={} hayatta-kalan-makine={} uyari-var={}".format(
+                _crashed17d, _by_id17d.get(_sid17d, {}).get("machine"), _warned_ok17d)))
+    finally:
+        try:
+            for _f in _id17d.glob("*"):
+                _f.unlink()
+            os.rmdir(str(_id17d))
+        except OSError:
+            pass
+
     print("\n-- 18b. export_sessions include_imports=False korumasi --")
     import tempfile as _tf18b
     _gd = Path(_tf18b.mkdtemp(prefix="claude_cost_guard_"))
@@ -1720,6 +2052,39 @@ def selftest(config, config_path):
         try:
             _tp22b.unlink()
             os.rmdir(_td22b)
+        except OSError:
+            pass
+
+    print("\n-- 29. --set-baseline diger --set-* bayraklariyla ayni cagride yaziliyor --")
+    # main() eskiden plan/idle/tracking-start yazma blogundan erken 0 ile
+    # donuyordu; --set-tracking-start ile AYNI cagrida verilen --set-baseline
+    # o zaman hic isleme girmeden sessizce ATLANIYORDU - basarili bir yazim
+    # gibi gorunen bir cikti basip aslinda tabani yazmiyordu.
+    import tempfile as _tf29
+    _td29 = _tf29.mkdtemp(prefix="claude_cost_setbase_")
+    _tp29 = Path(_td29) / "cost-config.json"
+    try:
+        _rc29 = main(["--set-tracking-start", "2026-08", "--set-baseline", "1500",
+                     "--config", str(_tp29)])
+        with open(str(_tp29), "r", encoding="utf-8") as _f29:
+            _written29 = json.load(_f29)
+        _r29 = (_rc29 == 0
+               and _written29.get("tracking_start_month") == "2026-08"
+               and abs(float(_written29.get("baseline_monthly_api_cost") or 0.0)
+                       - 1500.0) < 1e-9
+               and isinstance(_written29.get("baseline_source"), dict))
+        results.append(_ok(
+            "29. --set-tracking-start + --set-baseline ayni cagride ikisi de "
+            "config'e yaziliyor",
+            _r29,
+            "cikis={} tracking={} baseline={} baseline_source-dict={}".format(
+                _rc29, _written29.get("tracking_start_month"),
+                _written29.get("baseline_monthly_api_cost"),
+                isinstance(_written29.get("baseline_source"), dict))))
+    finally:
+        try:
+            _tp29.unlink()
+            os.rmdir(_td29)
         except OSError:
             pass
 
@@ -1856,7 +2221,8 @@ def main(argv=None):
     config, config_path = load_config(args.config)
 
     if (args.set_plan is not None or args.set_idle_gap is not None
-            or args.set_tracking_start is not None):
+            or args.set_tracking_start is not None
+            or args.set_baseline is not None):
         if args.set_plan is not None:
             config["plan"]["amount"] = float(args.set_plan)
         if args.set_idle_gap is not None:
@@ -1873,6 +2239,15 @@ def main(argv=None):
                                  "olmali (ornek 2026-08).\n")
                 return 2
             config["tracking_start_month"] = parsed.strftime("%Y-%m")
+        if args.set_baseline is not None:
+            if args.set_baseline <= 0:
+                sys.stderr.write("HATA: --set-baseline sifirdan buyuk olmali.\n")
+                return 2
+            config["baseline_monthly_api_cost"] = float(args.set_baseline)
+            config["baseline_source"] = {
+                "set_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "method": "manual",
+            }
         if args.currency:
             config["plan"]["currency"] = args.currency
         if args.label:
@@ -1885,6 +2260,8 @@ def main(argv=None):
         print("  ara esigi: {}".format(fmt_threshold(config["idle_gap_seconds"])))
         print("  takip baslangici: {}".format(
             config.get("tracking_start_month") or "(tum gecmis)"))
+        if args.set_baseline is not None:
+            print("  taban    : {}/ay".format(fmt_money(args.set_baseline)))
         return 0
 
     if args.idle_gap is not None:
@@ -1936,21 +2313,7 @@ def main(argv=None):
         return 0
 
     if args.suggest_baseline:
-        print(suggest_baseline_text(config))
-        return 0
-
-    if args.set_baseline is not None:
-        if args.set_baseline <= 0:
-            sys.stderr.write("HATA: --set-baseline sifirdan buyuk olmali.\n")
-            return 2
-        config["baseline_monthly_api_cost"] = float(args.set_baseline)
-        config["baseline_source"] = {
-            "set_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "method": "manual",
-        }
-        written = save_config(config, config_path)
-        print("Taban yazildi: {}/ay".format(fmt_money(args.set_baseline)))
-        print("  {}".format(written))
+        print(suggest_baseline_text(config, tags=load_tags(args.tags)))
         return 0
 
     if args.tag_project:
@@ -1999,11 +2362,26 @@ def main(argv=None):
         return 2
 
     if args.month:
-        month = (datetime.datetime.now().strftime("%Y-%m")
-                 if args.month == "__current__" else args.month)
-        report = build_month_report(month, config, config_path)
+        if args.month == "__current__":
+            month = datetime.datetime.now().strftime("%Y-%m")
+        else:
+            txt = args.month.strip()
+            try:
+                parsed_month = datetime.datetime.strptime(txt, "%Y-%m")
+            except ValueError:
+                sys.stderr.write("HATA: --month YYYY-MM biciminde olmali "
+                                 "(ornek 2026-08).\n")
+                return 2
+            month = parsed_month.strftime("%Y-%m")
+        report = build_month_report(month, config, config_path,
+                                    tags=load_tags(args.tags))
     else:
-        path, how = find_session_file(args.session)
+        path, how = find_session_file(args.session, strict=bool(args.session))
+        if how == "gecersiz":
+            sys.stderr.write(
+                "HATA: '{}' icin transcript bulunamadi. Session ID'yi "
+                "--tag-list ile kontrol edin.\n".format(args.session))
+            return 2
         if path is None:
             sys.stderr.write("HATA: {} altinda hic transcript (.jsonl) yok.\n"
                              .format(PROJECTS_DIR))

@@ -134,7 +134,7 @@ isteğinin kendisi olduğu için ayrıca onay gerektirmez.
 
 - **Rakamlar API liste fiyatı üzerinden "API-karşılığı" maliyettir.** Abonelik
   (Pro/Max) planında gerçekte bu tutar tahsil edilmez; bu, session'ın ağırlığını
-  ölçmek ve plan payını dağıtmak için kullanılan bir vekildir.
+  dondurulmuş bir tabana oranlayarak ölçmek için kullanılan bir vekildir.
 - **Plan maliyeti sabit orana dayanır ve session bitiminde sabitlenir:**
   `session_API_karşılığı ÷ TABAN × plan_tutarı`. Payda ay toplamı **değil**,
   config'e yazılmış **dondurulmuş taban**dır — bu yüzden bir session'ın rakamı
@@ -161,8 +161,10 @@ isteğinin kendisi olduğu için ayrıca onay gerektirmez.
 - **Çoklu makine.** Her makinede `--export <dosya> --machine <ad>` çalıştırılır
   (yalnızca özet rakamlar yazılır, **konuşma metni içermez**). Kullanıcı bu
   dosyayı ana makinede `~/.claude/cost-imports/` klasörüne kopyalar; sonraki
-  raporlar (session ve ay) bu makinelerin session'larını otomatik olarak
-  birleştirip gösterir — ayrı bir birleştirme komutu yoktur.
+  ay/toplu raporlar bu makinelerin session'larını otomatik olarak birleştirip
+  gösterir — ayrı bir birleştirme komutu yoktur. Session raporu (`--session`
+  ya da argümansız) yerel tek bir transcript'i okur, `cost-imports/` dosyalarına
+  hiç bakmaz — içe aktarılan session'lar yalnızca ay/toplu raporlarda görünür.
 - Config dosyası: `~/.claude/cost-config.json`, etiket deposu:
   `~/.claude/cost-tags.json` (ilk çalıştırmada otomatik oluşur, repoya
   girmez, her makinede yereldir).
