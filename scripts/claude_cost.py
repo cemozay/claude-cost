@@ -39,6 +39,10 @@ DEFAULT_CONFIG = {
     # --tag-list'te listelenmez, "etiketsiz" uyarisi uretmez.
     # None = tum gecmis kapsamda (geriye uyumluluk).
     "tracking_start_month": None,
+    # Dondurulmus taban. ASLA kendiliginden degismez; yalnizca --set-baseline yazar.
+    # None ise rapor sayi uretmez, hata verir.
+    "baseline_monthly_api_cost": None,
+    "baseline_source": None,
     "pricing_per_mtok": {
         "claude-fable-5":   {"input": 10.0, "output": 50.0},
         "claude-mythos-5":  {"input": 10.0, "output": 50.0},
@@ -571,6 +575,64 @@ def plan_share(session_cost, month_cost, plan_amount):
     return {"ratio": ratio, "amount": ratio * plan_amount}
 
 
+class BaselineNotSetError(Exception):
+    """Taban set edilmemis. Rapor sayi uydurmaz, durur."""
+
+
+def fixed_plan_cost(session_cost, config):
+    """Sabit oranli plan maliyeti.
+
+    session_API_karsiligi / TABAN x plan_tutari
+
+    Payda ay toplami DEGIL dondurulmus tabandir; bu yuzden rakam session
+    bitiminde sabitlenir ve sonradan acilan oturumlardan etkilenmez.
+    """
+    baseline = config.get("baseline_monthly_api_cost")
+    if not baseline or float(baseline) <= 0:
+        raise BaselineNotSetError(
+            "Taban set edilmemis. Once '--suggest-baseline' ile bakin, "
+            "sonra '--set-baseline <tutar>' ile yazin.")
+    plan_amount = float(config.get("plan", {}).get("amount", 0.0))
+    ratio = float(session_cost) / float(baseline)
+    return {"ratio": ratio, "amount": ratio * plan_amount,
+            "baseline": float(baseline)}
+
+
+def suggest_baseline_text(config):
+    """Yalnizca TAVSIYE. Hicbir sey yazmaz."""
+    sessions = collect_sessions(config)
+    now = datetime.datetime.now()
+    mk = now.strftime("%Y-%m")
+    dahil = [s for s in sessions if s["tag"] is True and month_key(s["start"]) == mk]
+    etiketsiz = [s for s in sessions if s["tag"] is None and month_key(s["start"]) == mk]
+    toplam = sum(s["cost"] for s in dahil)
+
+    import calendar
+    gun_sayisi = calendar.monthrange(now.year, now.month)[1]
+    gecen = now.day
+    izdusum = toplam * gun_sayisi / gecen if gecen > 0 else 0.0
+
+    L = []
+    L.append("Takip baslangici: {}".format(
+        config.get("tracking_start_month") or "(tum gecmis)"))
+    L.append("")
+    L.append("  Dahil edilen ({}, su ana kadar) : {} session   {}".format(
+        mk, len(dahil), fmt_money(toplam)))
+    L.append("  Ayin gecen kismi                : {}/{} gun".format(gecen, gun_sayisi))
+    L.append("  Dogrusal izdusum (tam ay)       : ~{}   [TAHMIN]".format(
+        fmt_money(izdusum)))
+    if etiketsiz:
+        L.append("")
+        L.append("  Etiketsiz: {} session  {}   <-- once bunlari etiketle, "
+                 "sayi degisir".format(len(etiketsiz),
+                                       fmt_money(sum(s["cost"] for s in etiketsiz))))
+    L.append("")
+    L.append("Izdusum duzenli kullanim varsayar; kullanimin dalgaliysa yanilir.")
+    L.append("Tabani sen seciyorsun. Ornek:")
+    L.append("  claude_cost.py --set-baseline {:.0f}".format(max(izdusum, 1.0)))
+    return "\n".join(L)
+
+
 def is_current_month(month):
     return month == datetime.datetime.now().strftime("%Y-%m")
 
@@ -1010,6 +1072,18 @@ def selftest(config, config_path):
         and in_tracking_scope(_t_out, _c22none) is True,
         "2026-08 esigi: Agu ici -> True, Tem -> False, esik yokken -> True"))
 
+    print("\n-- 21. Taban yoklugu --")
+    _c21 = json.loads(json.dumps(config))
+    _c21["baseline_monthly_api_cost"] = None
+    try:
+        fixed_plan_cost(100.0, _c21)
+        r21 = False
+        det21 = "hata firlatmadi"
+    except BaselineNotSetError:
+        r21 = True
+        det21 = "BaselineNotSetError firlatildi"
+    results.append(_ok("21. Taban yokken sayi uretilmiyor", r21, det21))
+
     print("\n-- 22b. Aylik kanoniklestirilmesi --")
     import tempfile as _tf22b
     _td22b = _tf22b.mkdtemp(prefix="claude_cost_track_")
@@ -1144,6 +1218,10 @@ def main(argv=None):
                     help="cwd desenine uyan session'lari toplu etiketle")
     ap.add_argument("--yes", action="store_true",
                     help="toplu islemde onay sorma")
+    ap.add_argument("--set-baseline", type=float, metavar="TUTAR",
+                    help="tabani config'e kalici yaz")
+    ap.add_argument("--suggest-baseline", action="store_true",
+                    help="taban icin tavsiye goster (hicbir sey yazmaz)")
     ap.add_argument("--currency", metavar="KOD",
                     help="para birimi (--set-plan ile birlikte kalici)")
     ap.add_argument("--label", metavar="AD", help="plan etiketi (Pro, Max, ...)")
@@ -1229,6 +1307,24 @@ def main(argv=None):
         remove_tag(store, args.untag)
         save_tags(store, args.tags)
         print("Etiket kaldirildi: {} -> etiketsiz".format(args.untag))
+        return 0
+
+    if args.suggest_baseline:
+        print(suggest_baseline_text(config))
+        return 0
+
+    if args.set_baseline is not None:
+        if args.set_baseline <= 0:
+            sys.stderr.write("HATA: --set-baseline sifirdan buyuk olmali.\n")
+            return 2
+        config["baseline_monthly_api_cost"] = float(args.set_baseline)
+        config["baseline_source"] = {
+            "set_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "method": "manual",
+        }
+        written = save_config(config, config_path)
+        print("Taban yazildi: {}/ay".format(fmt_money(args.set_baseline)))
+        print("  {}".format(written))
         return 0
 
     if args.tag_project:
