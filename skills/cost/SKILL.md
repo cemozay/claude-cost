@@ -40,9 +40,9 @@ kullanıcıya ID sorma — `$CLAUDE_CODE_SESSION_ID` ortam değişkenini kullan.
 |---|---|
 | bu session (varsayılan) | *(yok)* |
 | belirli bir session | `--session <id>` |
-| bu ayki durum ne | `--month` |
-| geçen ayki maliyetim ne | `--month <YYYY-MM>` — geçen ayı bugünün tarihinden **sen** hesapla, kullanıcıya sorma |
-| belirli bir ay | `--month 2026-07` |
+| bu ayki/bu dönemki durum ne | `--month` |
+| geçen ayki/dönemki maliyetim ne | `--month <YYYY-MM>` — geçen ayı bugünün tarihinden **sen** hesapla, kullanıcıya sorma |
+| belirli bir ay | `--month 2026-07` (fatura dönemi takvim ayı değilse, o ayda **başlayan** döneme çözülür — bkz. "Bilinmesi gerekenler") |
 
 **Plan / eşik (geçici = bu çalıştırma, kalıcı = config'e yazılır)**
 
@@ -55,6 +55,7 @@ kullanıcıya ID sorma — `$CLAUDE_CODE_SESSION_ID` ortam değişkenini kullan.
 | "ara eşiğini kalıcı değiştir" | `--set-idle-gap 10` |
 | para birimi değişikliği | `--currency EUR` (kalıcı için `--set-plan` ile birlikte) |
 | "takibi bu aydan başlat" | `--set-tracking-start <YYYY-MM>` |
+| "fatura dönemim her ayın 8'inde başlıyor" | `--set-billing-day 8` (1-28 arası; 29/30/31 kabul edilmez çünkü her ayda o gün yok) |
 
 **Taban (baseline) — bkz. "Bilinmesi gerekenler" için anlamı**
 
@@ -150,6 +151,14 @@ isteğinin kendisi olduğu için ayrıca onay gerektirmez.
   (sayılmaz) ve **`etiketsiz`** — üçüncü, ayrı bir durumdur. Etiketsiz
   session'lar ne toplama dahil edilir ne sessizce atlanır; ay raporunda ayrı
   bir satırda sayı ve tutarıyla gösterilir.
+- **"Ay" her zaman takvim ayı değildir — `billing_cycle_day` set edilmişse
+  bir fatura DÖNEMİdir.** `billing_cycle_day` 1 (varsayılan) değilse aylık
+  raporun başlığı artık "Ağustos 2026" değil, `8 Ağustos 2026 - 8 Eylül 2026`
+  gibi bir dönem aralığıdır — betiğin bastığı bu başlığı **aynen** ilet,
+  kendin "ay" diye yeniden adlandırma. Kullanıcıya bundan bahsederken de
+  "bu ay" yerine "bu dönem" / "bu fatura dönemi" de, özellikle ay ortasında
+  büyük bir harcama varsa: o harcama, dönemin hangi tarafına düştüğüne göre
+  önceki ya da sonraki döneme sayılır, takvim ayına değil.
 - **Aylık toplam artık plan tutarına eşit değildir.** Bunun yerine bir
   kullanım oranı gösterilir: %130 "planı bu ay yoğun kullanıyorsun", %40
   "az kullanıyorsun" demektir. Bu bir hata değil, bilgidir.

@@ -43,6 +43,10 @@ DEFAULT_CONFIG = {
     # --tag-list'te listelenmez, "etiketsiz" uyarisi uretmez.
     # None = tum gecmis kapsamda (geriye uyumluluk).
     "tracking_start_month": None,
+    # Fatura donemi bu aydan ONCE baslamaz. 1 = takvim ayi (varsayilan,
+    # geriye uyumlu). 1-28 disi bir deger REDDEDILIR: her ayda o gun bulunsun
+    # diye (29/30/31 bazi aylarda yok).
+    "billing_cycle_day": 1,
     # Dondurulmus taban. ASLA kendiliginden degismez; yalnizca --set-baseline yazar.
     # None ise rapor sayi uretmez, hata verir.
     "baseline_monthly_api_cost": None,
@@ -486,21 +490,103 @@ def price_requests(requests, config):
             "unknown_models": unknown, "request_count": len(requests)}
 
 
-# ---------------------------------------------------------------- 6. aylik
+# ---------------------------------------------------------------- 6. aylik/donem
 
-def month_key(dt):
-    return to_local(dt).strftime("%Y-%m")
+def _billing_cycle_day(config):
+    """config'teki billing_cycle_day'i 1-28 araligina dogrular.
+
+    Elle duzenlenmis config her seyi icerebilir (0, 29, "abc", None, ...).
+    Gecersiz bir deger REPORT'U COKERTMEMELI - 1'e (takvim ayi) sessizce
+    degil ama GORULEBILIR sekilde geri duser. --set-billing-day zaten yazma
+    ANINDA 1-28 disini reddeder (bkz. main()); burasi yalnizca elle
+    bozulmus dosyalar icin son bir savunma hattidir.
+    """
+    raw = config.get("billing_cycle_day", 1)
+    try:
+        day = int(raw)
+    except (TypeError, ValueError):
+        day = None
+    if day is None or isinstance(raw, bool) or day < 1 or day > 28:
+        return 1
+    return day
+
+
+def _period_bounds(dt, config):
+    """(baslangic, bitis-haric) - donemin sinirlari, datetime.date olarak.
+
+    Gun bileseni HER ZAMAN cycle_day'dir; ay, dt'nin (yerel gunu cycle_day'e
+    esit ya da sonrasindaysa) icinde bulundugu ay, degilse bir onceki aydir.
+    """
+    day = _billing_cycle_day(config)
+    local = to_local(dt)
+    year, month = local.year, local.month
+    if local.day < day:
+        month -= 1
+        if month == 0:
+            month, year = 12, year - 1
+    start = datetime.date(year, month, day)
+    end_month, end_year = month + 1, year
+    if end_month == 13:
+        end_month, end_year = 1, end_year + 1
+    end = datetime.date(end_year, end_month, day)
+    return start, end
+
+
+def period_key(dt, config):
+    """Session'in ait oldugu donemin anahtarini dondurur.
+
+    billing_cycle_day == 1: "YYYY-MM" - month_key()'in ESKI davranisiyla
+    BIREBIR ayni (geriye uyumluluk; tracking_start_month karsilastirmasi
+    bu bicime gore yazilmis durumda).
+    Aksi halde: donemin BASLANGIC tarihi "YYYY-MM-DD". Bir zaman damgasi
+    cycle gununde ya da sonrasindaysa o ayin donemine, oncesindeyse bir
+    onceki ayin donemine ait sayilir.
+
+    Her iki bicim de dize olarak KRONOLOJIK SIRAYLA siralanir (bkz.
+    in_tracking_scope, month_totals'taki before_tracking karsilastirmasi).
+    """
+    day = _billing_cycle_day(config)
+    if day == 1:
+        return to_local(dt).strftime("%Y-%m")
+    start, _end = _period_bounds(dt, config)
+    return start.strftime("%Y-%m-%d")
+
+
+def period_label(key, config):
+    """Rapor basliginda gosterilecek Turkce metin.
+
+    "2026-08" -> "Agustos 2026"
+    "2026-08-08" -> "8 Agustos 2026 - 8 Eylul 2026"
+    """
+    parts = key.split("-")
+    if len(parts) == 2:
+        y, mo = parts
+        return "{} {}".format(TR_MONTHS[int(mo)], y)
+    y, mo, d = parts
+    day = int(d)
+    end_month, end_year = int(mo) + 1, int(y)
+    if end_month == 13:
+        end_month, end_year = 1, end_year + 1
+    return "{} {} {} - {} {} {}".format(
+        day, TR_MONTHS[int(mo)], y, day, TR_MONTHS[end_month], end_year)
+
+
+def is_current_period(key, config):
+    """key, bugunun ait oldugu donem mi?"""
+    return key == period_key(datetime.datetime.now(), config)
 
 
 def in_tracking_scope(start_dt, config):
-    """Session takip kapsaminda mi? month_key 'YYYY-MM' dondugu icin
-    dize karsilastirmasi kronolojik siralamayla ayni sonucu verir."""
+    """Session takip kapsaminda mi? period_key() 'YYYY-MM' ya da
+    'YYYY-MM-DD' dondugu icin dize karsilastirmasi kronolojik siralamayla
+    ayni sonucu verir (iki bicim karisik olsa bile: "2026-08" < "2026-08-08"
+    ve "2026-07-08" < "2026-08" - bkz. period_key docstring'i)."""
     start_month = config.get("tracking_start_month")
     if not start_month:
         return True
     if start_dt is None:
         return False
-    return month_key(start_dt) >= start_month
+    return period_key(start_dt, config) >= start_month
 
 
 def collect_sessions(config, tags=None, quiet=True, include_imports=True):
@@ -676,7 +762,7 @@ def month_totals(month, config, quiet=True, tags=None):
     import edilmis makineler dahildir.
     """
     sessions = [s for s in collect_sessions(config, tags=tags, quiet=quiet)
-                if month_key(s["start"]) == month]
+                if period_key(s["start"], config) == month]
     dahil = [s for s in sessions if s["tag"] is True]
     haric = [s for s in sessions if s["tag"] is False]
     etiketsiz = [s for s in sessions if s["tag"] is None]
@@ -685,6 +771,8 @@ def month_totals(month, config, quiet=True, tags=None):
     tracking_start = config.get("tracking_start_month")
     out = {
         "month": month,
+        "label": period_label(month, config),
+        "is_current": is_current_period(month, config),
         "dahil": dahil, "haric": haric, "etiketsiz": etiketsiz,
         "dahil_cost": dahil_cost,
         "haric_cost": sum(s["cost"] for s in haric),
@@ -695,6 +783,9 @@ def month_totals(month, config, quiet=True, tags=None):
         # Ay hic session icermiyorsa (kapsamin disinda ya da henuz veri yok)
         # rapor katmani (render_text) sayi basmaz - bkz. asagidaki has_sessions.
         "has_sessions": bool(sessions),
+        # before_tracking: month ve tracking_start_month FARKLI bicimde olsa
+        # bile ("YYYY-MM-DD" vs "YYYY-MM") dize karsilastirmasi kronolojik
+        # sirayla ayni sonucu verir - bkz. period_key/in_tracking_scope.
         "before_tracking": bool(tracking_start) and month < tracking_start,
         "tracking_start_month": tracking_start,
     }
@@ -748,14 +839,20 @@ def suggest_baseline_text(config, tags=None):
     """Yalnizca TAVSIYE. Hicbir sey yazmaz."""
     sessions = collect_sessions(config, tags=tags)
     now = datetime.datetime.now()
-    mk = now.strftime("%Y-%m")
-    dahil = [s for s in sessions if s["tag"] is True and month_key(s["start"]) == mk]
-    etiketsiz = [s for s in sessions if s["tag"] is None and month_key(s["start"]) == mk]
+    mk = period_key(now, config)
+    dahil = [s for s in sessions
+             if s["tag"] is True and period_key(s["start"], config) == mk]
+    etiketsiz = [s for s in sessions
+                 if s["tag"] is None and period_key(s["start"], config) == mk]
     toplam = sum(s["cost"] for s in dahil)
 
-    import calendar
-    gun_sayisi = calendar.monthrange(now.year, now.month)[1]
-    gecen = now.day
+    # Donemin toplam uzunlugu ve su ana kadar gecen kismi: cycle_day == 1
+    # iken bu, takvim ayinin gun sayisi/gecen gunuyle AYNI sonucu verir
+    # (start her zaman ayin 1'i olur); cycle_day > 1 iken donem iki takvim
+    # ayina yayilabilir (ornek: 8 Agustos - 8 Eylul).
+    start, end = _period_bounds(now, config)
+    gun_sayisi = (end - start).days
+    gecen = (to_local(now).date() - start).days + 1
     izdusum = toplam * gun_sayisi / gecen if gecen > 0 else 0.0
 
     L = []
@@ -764,8 +861,8 @@ def suggest_baseline_text(config, tags=None):
     L.append("")
     L.append("  Dahil edilen ({}, su ana kadar) : {} session   {}".format(
         mk, len(dahil), fmt_money(toplam)))
-    L.append("  Ayin gecen kismi                : {}/{} gun".format(gecen, gun_sayisi))
-    L.append("  Dogrusal izdusum (tam ay)       : ~{}   [TAHMIN]".format(
+    L.append("  Donemin gecen kismi             : {}/{} gun".format(gecen, gun_sayisi))
+    L.append("  Dogrusal izdusum (tam donem)    : ~{}   [TAHMIN]".format(
         fmt_money(izdusum)))
     if etiketsiz:
         L.append("")
@@ -777,10 +874,6 @@ def suggest_baseline_text(config, tags=None):
     L.append("Tabani sen seciyorsun. Ornek:")
     L.append("  claude_cost.py --set-baseline {:.0f}".format(max(izdusum, 1.0)))
     return "\n".join(L)
-
-
-def is_current_month(month):
-    return month == datetime.datetime.now().strftime("%Y-%m")
 
 
 # ---------------------------------------------------------------- 8. cikti
@@ -876,10 +969,8 @@ def render_text(report):
                 fmt_money(fc["amount"], cur)))
     else:
         m = report["month"]
-        mk = m["month"]
-        y, mo = mk.split("-")
-        etiket = "  (ay ici, gecici)" if is_current_month(mk) else ""
-        L.append("{} {}{}".format(TR_MONTHS[int(mo)], y, etiket))
+        etiket = "  (donem ici, gecici)" if m.get("is_current") else ""
+        L.append("{}{}".format(m.get("label", m["month"]), etiket))
         L.append("")
         if not m.get("has_sessions"):
             # Kapsam disi/veri yok: sifir bir rakam degildir, ayri bir durum -
@@ -1694,7 +1785,8 @@ def selftest(config, config_path):
         _probe20 = _local20[0]
         _sid20 = _probe20["session_id"]
         _ham_store20 = {"version": 1, "tags": {_sid20: 1}}
-        _mt20b = month_totals(month_key(_probe20["start"]), config, tags=_ham_store20)
+        _mt20b = month_totals(period_key(_probe20["start"], config), config,
+                              tags=_ham_store20)
         _truthy_disinda20 = _sid20 not in [s["session_id"] for s in _mt20b["dahil"]]
     else:
         _truthy_disinda20 = True  # test kosulamadi, ama diger kosullari engelleme
@@ -1753,7 +1845,7 @@ def selftest(config, config_path):
         else:
             _probe17b = _local17b[0]
             _c17b = json.loads(json.dumps(config))
-            _c17b["tracking_start_month"] = month_key(_probe17b["start"])
+            _c17b["tracking_start_month"] = period_key(_probe17b["start"], _c17b)
 
             _new_sid17b = "MERGE-TEST-NEW-SESSION-ID"
             _old_sid17b = "MERGE-TEST-OLD-SESSION-ID"
@@ -2132,6 +2224,206 @@ def selftest(config, config_path):
                        _has_fields and _sorted and len(_sessions) > 0,
                        "{} session".format(len(_sessions))))
 
+    print("\n-- 30. period_key sinir: cycle_day donem sinirini yerel tarihe gore ayiriyor --")
+    # billing_cycle_day=8: yerel Agustos 7 -> ONCEKI donem (2026-07-08),
+    # yerel Agustos 8 -> YENI donem (2026-08-08). Sinir UTC damgadan YEREL
+    # tarihe to_local() ile cozulur - dogrudan dt.day (UTC gunu) kullanilsa
+    # bazi saat dilimlerinde (ornek: UTC+3) yanlis donem secilir: 23:00Z zaten
+    # yerelde ERTESI gundur. Yerel gece yarisinin UTC karsiligi CALISMA
+    # ANINDA hesaplanir - makinenin saat dilimine sabit kodlama YAPILMAZ,
+    # boylece bu kontrol her makinede gecerli kalir.
+    _c30 = json.loads(json.dumps(config))
+    _c30["billing_cycle_day"] = 8
+    _yerel_gece_yarisi30 = datetime.datetime(2026, 8, 8, 0, 0, 0)
+    _offset30 = _yerel_gece_yarisi30.astimezone().utcoffset()
+    _utc_sinir30 = (_yerel_gece_yarisi30.replace(tzinfo=datetime.timezone.utc)
+                    - _offset30)
+    _t_once30 = _utc_sinir30 - datetime.timedelta(hours=2)   # yerel Agu7 22:00
+    _t_sonra30 = _utc_sinir30 + datetime.timedelta(hours=2)  # yerel Agu8 02:00
+    _k_once30 = period_key(_t_once30, _c30)
+    _k_sonra30 = period_key(_t_sonra30, _c30)
+    results.append(_ok(
+        "30. period_key sinir: cycle_day oncesi/sonrasi FARKLI donemlere "
+        "dusuyor, onceki KRONOLOJIK OLARAK ONCE geliyor",
+        _k_once30 == "2026-07-08" and _k_sonra30 == "2026-08-08"
+        and _k_once30 < _k_sonra30,
+        "yerel-Agu7-22:00(UTC {}) -> {} | yerel-Agu8-02:00(UTC {}) -> {}".format(
+            _t_once30.isoformat(), _k_once30, _t_sonra30.isoformat(), _k_sonra30)))
+
+    print("\n-- 31. period_key (cycle=1) eski month_key formuluyle birebir ayni --")
+    # Geriye uyumluluk garantisi: billing_cycle_day=1 iken period_key()
+    # eski month_key()'in ("YYYY-MM", ay basi/sonu, artik yil dahil) urettigi
+    # anahtarlarla BYTE-BYTE ayni olmali. month_key() KALDIRILDIGI icin eski
+    # formul burada BAGIMSIZ (period_key'i cagirmadan) yeniden yazilir -
+    # aksi halde bu kontrol kendi kendini dogrulayan sahte bir kontrole doner.
+    _c31 = json.loads(json.dumps(config))
+    _c31["billing_cycle_day"] = 1
+    _zamanlar31 = [
+        "2026-01-01T00:00:00Z", "2026-01-31T23:59:59Z", "2026-02-28T12:00:00Z",
+        "2024-02-29T12:00:00Z",  # artik yil
+        "2026-08-07T12:00:00Z", "2026-08-08T12:00:00Z", "2026-12-31T23:59:59Z",
+        "2027-01-01T00:00:01Z",
+    ]
+    _ayni31 = True
+    _detay31 = []
+    for _z in _zamanlar31:
+        _dt31 = parse_ts(_z)
+        _eski31 = to_local(_dt31).strftime("%Y-%m")   # eski month_key() formulu
+        _yeni31 = period_key(_dt31, _c31)
+        _ayni31 = _ayni31 and (_eski31 == _yeni31)
+        _detay31.append("{}->{}".format(_z, _yeni31))
+    results.append(_ok(
+        "31. billing_cycle_day=1 iken period_key eski month_key formuluyle "
+        "birebir ayni (geriye uyumluluk)",
+        _ayni31, "; ".join(_detay31)))
+
+    print("\n-- 32. Ardisik donem anahtarlari kronolojik sirayla siraliyor --")
+    _c32 = json.loads(json.dumps(config))
+    _c32["billing_cycle_day"] = 8
+    _anahtarlar32 = []
+    _yil32, _ay32 = 2025, 1
+    for _ in range(30):
+        _anahtarlar32.append(
+            period_key(datetime.datetime(_yil32, _ay32, 8, 12, 0, 0), _c32))
+        _ay32 += 1
+        if _ay32 == 13:
+            _ay32, _yil32 = 1, _yil32 + 1
+    import random as _rnd32
+    _karisik32 = list(_anahtarlar32)
+    _rnd32.Random(42).shuffle(_karisik32)
+    _r32 = (sorted(_karisik32) == _anahtarlar32
+           and len(set(_anahtarlar32)) == len(_anahtarlar32))
+    results.append(_ok(
+        "32. Ardisik donem anahtarlarinin lex. siralamasi kronolojik "
+        "sirayla ayni",
+        _r32, "{} donem, ilk={} son={}".format(
+            len(_anahtarlar32), _anahtarlar32[0], _anahtarlar32[-1])))
+
+    print("\n-- 33. --month YYYY-MM/YYYY-MM-DD cozumlemesi (billing_cycle_day>1) --")
+    import tempfile as _tf33
+    import io as _io33
+    import contextlib as _ctx33
+    _td33 = _tf33.mkdtemp(prefix="claude_cost_month8_")
+    _tp33_cfg = Path(_td33) / "cost-config.json"
+    try:
+        _cfg33 = json.loads(json.dumps(DEFAULT_CONFIG))
+        _cfg33["billing_cycle_day"] = 8
+        save_config(_cfg33, _tp33_cfg)
+
+        _out33a = _io33.StringIO()
+        with _ctx33.redirect_stdout(_out33a):
+            _rc33a = main(["--month", "2026-08", "--config", str(_tp33_cfg)])
+        _txt33a = _out33a.getvalue()
+        _r33_yyyymm = (_rc33a == 0
+                      and "8 Agustos 2026 - 8 Eylul 2026" in _txt33a)
+
+        _err33b = _io33.StringIO()
+        with _ctx33.redirect_stdout(_io33.StringIO()), \
+             _ctx33.redirect_stderr(_err33b):
+            _rc33b = main(["--month", "2026-08-07", "--config", str(_tp33_cfg)])
+        _r33_yanlis_gun = _rc33b == 2 and "HATA" in _err33b.getvalue()
+
+        _out33c = _io33.StringIO()
+        with _ctx33.redirect_stdout(_out33c):
+            _rc33c = main(["--month", "2026-08-08", "--config", str(_tp33_cfg)])
+        _txt33c = _out33c.getvalue()
+        _r33_dogru_gun = (_rc33c == 0
+                          and "8 Agustos 2026 - 8 Eylul 2026" in _txt33c)
+
+        _err33d = _io33.StringIO()
+        with _ctx33.redirect_stdout(_io33.StringIO()), \
+             _ctx33.redirect_stderr(_err33d):
+            _rc33d = main(["--month", "cop-veri", "--config", str(_tp33_cfg)])
+        _r33_cop = _rc33d == 2 and "HATA" in _err33d.getvalue()
+
+        results.append(_ok(
+            "33. --month: YYYY-MM donem baslangicina cozuluyor, YYYY-MM-DD "
+            "yalnizca cycle gununde kabul ediliyor, cop veri reddediliyor",
+            _r33_yyyymm and _r33_yanlis_gun and _r33_dogru_gun and _r33_cop,
+            "YYYY-MM cikis={} etiket-var={} | yanlis-gun(2026-08-07) "
+            "cikis={} HATA-var={} | dogru-gun(2026-08-08) cikis={} "
+            "etiket-var={} | cop-veri cikis={} HATA-var={}".format(
+                _rc33a, _r33_yyyymm, _rc33b, "HATA" in _err33b.getvalue(),
+                _rc33c, _r33_dogru_gun, _rc33d, "HATA" in _err33d.getvalue())))
+    finally:
+        try:
+            if _tp33_cfg.exists():
+                _tp33_cfg.unlink()
+            os.rmdir(_td33)
+        except OSError:
+            pass
+
+    print("\n-- 34. --set-billing-day kalicilastirma + dogrulama + --set-* ile birlikte --")
+    import tempfile as _tf34
+    import io as _io34
+    import contextlib as _ctx34
+    _td34 = _tf34.mkdtemp(prefix="claude_cost_billday_")
+    _tp34_cfg = Path(_td34) / "cost-config.json"
+    try:
+        _rc34a = main(["--set-billing-day", "8", "--config", str(_tp34_cfg)])
+        with open(str(_tp34_cfg), "r", encoding="utf-8") as _f34a:
+            _written34a = json.load(_f34a)
+        _r34_yaz = (_rc34a == 0 and _written34a.get("billing_cycle_day") == 8)
+
+        _err34b = _io34.StringIO()
+        with _ctx34.redirect_stdout(_io34.StringIO()), \
+             _ctx34.redirect_stderr(_err34b):
+            _rc34b = main(["--set-billing-day", "0", "--config", str(_tp34_cfg)])
+        with open(str(_tp34_cfg), "r", encoding="utf-8") as _f34b:
+            _written34b = json.load(_f34b)
+        _r34_sifir = (_rc34b == 2 and "HATA" in _err34b.getvalue()
+                     and _written34b.get("billing_cycle_day") == 8)  # degismedi
+
+        _err34c = _io34.StringIO()
+        with _ctx34.redirect_stdout(_io34.StringIO()), \
+             _ctx34.redirect_stderr(_err34c):
+            _rc34c = main(["--set-billing-day", "29", "--config", str(_tp34_cfg)])
+        with open(str(_tp34_cfg), "r", encoding="utf-8") as _f34c:
+            _written34c = json.load(_f34c)
+        _r34_29 = (_rc34c == 2 and "HATA" in _err34c.getvalue()
+                  and _written34c.get("billing_cycle_day") == 8)  # degismedi
+
+        # argparse type=int metin gorunce KENDISI SystemExit(2) firlatir -
+        # main()'in normal donusu degil, main() cagrisi cevresinde
+        # yakalanmasi SART, aksi halde bu kontrol degil TUM selftest coker.
+        _err34d = _io34.StringIO()
+        _rc34d = None
+        try:
+            with _ctx34.redirect_stdout(_io34.StringIO()), \
+                 _ctx34.redirect_stderr(_err34d):
+                _rc34d = main(["--set-billing-day", "abc", "--config", str(_tp34_cfg)])
+        except SystemExit as _se34d:
+            _rc34d = _se34d.code
+        _r34_metin = _rc34d == 2
+
+        # Baska bir --set-* bayragiyla AYNI cagrida: check 29'un ayni riski
+        # (--set-baseline'in --set-tracking-start'la birlikte sessizce
+        # atlanmasi) --set-billing-day icin de gecerli - konsolide yazma
+        # blogunun ERKEN return ETMEDIGI burada dogrudan dogrulanir.
+        _rc34e = main(["--set-plan", "35", "--set-billing-day", "15",
+                      "--config", str(_tp34_cfg)])
+        with open(str(_tp34_cfg), "r", encoding="utf-8") as _f34e:
+            _written34e = json.load(_f34e)
+        _r34_birlikte = (_rc34e == 0
+                         and _written34e.get("billing_cycle_day") == 15
+                         and abs(float(_written34e.get("plan", {}).get("amount", 0))
+                                 - 35.0) < 1e-9)
+
+        results.append(_ok(
+            "34. --set-billing-day kaliciliasiyor, 0/29/metin reddediliyor, "
+            "baska --set-* ile ayni cagride birlikte calisiyor",
+            _r34_yaz and _r34_sifir and _r34_29 and _r34_metin and _r34_birlikte,
+            "yaz(8)={} | 0-reddedildi={} | 29-reddedildi={} | "
+            "metin-reddedildi(cikis={})={} | birlikte(plan=35,gun=15)={}".format(
+                _r34_yaz, _r34_sifir, _r34_29, _rc34d, _r34_metin, _r34_birlikte)))
+    finally:
+        try:
+            if _tp34_cfg.exists():
+                _tp34_cfg.unlink()
+            os.rmdir(_td34)
+        except OSError:
+            pass
+
     print("\n-- 10. Capraz platform (statik gozden gecirme) --")
     src = Path(__file__).read_text(encoding="utf-8")
     # Selftest'in KENDI govdesi taramadan cikarilir: asagidaki kontrollerin
@@ -2176,7 +2468,9 @@ def main(argv=None):
         description="Claude Code session sure + maliyet raporu")
     ap.add_argument("--session", metavar="ID", help="belirli session id")
     ap.add_argument("--month", nargs="?", const="__current__", metavar="YYYY-MM",
-                    help="aylik ozet (argumansiz: bu ay)")
+                    help="donem ozeti (argumansiz: bu donem; billing_cycle_day"
+                         " > 1 ise YYYY-MM o ayda BASLAYAN doneme cozulur, "
+                         "YYYY-MM-DD yalnizca cycle gununde kabul edilir)")
     ap.add_argument("--plan", type=float, metavar="TUTAR",
                     help="bu calistirma icin plan tutarini ez")
     ap.add_argument("--set-plan", type=float, metavar="TUTAR",
@@ -2187,6 +2481,8 @@ def main(argv=None):
                     help="ara esigini (dakika) config'e kalici yaz")
     ap.add_argument("--set-tracking-start", metavar="YYYY-MM",
                     help="takip baslangic ayini config'e kalici yaz")
+    ap.add_argument("--set-billing-day", type=int, metavar="GUN",
+                    help="fatura donem gununu (1-28) config'e kalici yaz")
     ap.add_argument("--tag", nargs=2, metavar=("SESSION-ID", "dahil|haric"),
                     help="tek session'i etiketle")
     ap.add_argument("--untag", metavar="SESSION-ID",
@@ -2222,7 +2518,8 @@ def main(argv=None):
 
     if (args.set_plan is not None or args.set_idle_gap is not None
             or args.set_tracking_start is not None
-            or args.set_baseline is not None):
+            or args.set_baseline is not None
+            or args.set_billing_day is not None):
         if args.set_plan is not None:
             config["plan"]["amount"] = float(args.set_plan)
         if args.set_idle_gap is not None:
@@ -2239,6 +2536,12 @@ def main(argv=None):
                                  "olmali (ornek 2026-08).\n")
                 return 2
             config["tracking_start_month"] = parsed.strftime("%Y-%m")
+        if args.set_billing_day is not None:
+            if args.set_billing_day < 1 or args.set_billing_day > 28:
+                sys.stderr.write("HATA: --set-billing-day 1 ile 28 arasinda "
+                                 "olmali (her ayda bu gun bulunsun diye).\n")
+                return 2
+            config["billing_cycle_day"] = int(args.set_billing_day)
         if args.set_baseline is not None:
             if args.set_baseline <= 0:
                 sys.stderr.write("HATA: --set-baseline sifirdan buyuk olmali.\n")
@@ -2260,6 +2563,7 @@ def main(argv=None):
         print("  ara esigi: {}".format(fmt_threshold(config["idle_gap_seconds"])))
         print("  takip baslangici: {}".format(
             config.get("tracking_start_month") or "(tum gecmis)"))
+        print("  fatura donem gunu: {}".format(config.get("billing_cycle_day", 1)))
         if args.set_baseline is not None:
             print("  taban    : {}/ay".format(fmt_money(args.set_baseline)))
         return 0
@@ -2362,17 +2666,47 @@ def main(argv=None):
         return 2
 
     if args.month:
+        cycle_day = _billing_cycle_day(config)
         if args.month == "__current__":
-            month = datetime.datetime.now().strftime("%Y-%m")
+            month = period_key(datetime.datetime.now(), config)
         else:
             txt = args.month.strip()
+            # Once tam DONEM anahtarini (YYYY-MM-DD) dene: billing_cycle_day
+            # > 1 iken bir --month degeri yalnizca cycle gunuyle eslesirse
+            # kabul edilir - baska bir gun sessizce baska bir doneme
+            # yuvarlanip yanlis rakam uretmesin diye ACIKCA reddedilir.
             try:
-                parsed_month = datetime.datetime.strptime(txt, "%Y-%m")
+                parsed_day = datetime.datetime.strptime(txt, "%Y-%m-%d")
             except ValueError:
-                sys.stderr.write("HATA: --month YYYY-MM biciminde olmali "
-                                 "(ornek 2026-08).\n")
-                return 2
-            month = parsed_month.strftime("%Y-%m")
+                parsed_day = None
+            if parsed_day is not None:
+                if parsed_day.day != cycle_day:
+                    sys.stderr.write(
+                        "HATA: --month icin '{}' gunu {}, billing_cycle_day "
+                        "({}) ile eslesmiyor. YYYY-MM-DD yalnizca cycle "
+                        "gununde kabul edilir.\n".format(
+                            txt, parsed_day.day, cycle_day))
+                    return 2
+                month = period_key(parsed_day, config)
+            else:
+                try:
+                    parsed_month = datetime.datetime.strptime(txt, "%Y-%m")
+                except ValueError:
+                    if cycle_day == 1:
+                        sys.stderr.write("HATA: --month YYYY-MM biciminde "
+                                         "olmali (ornek 2026-08).\n")
+                    else:
+                        sys.stderr.write(
+                            "HATA: --month YYYY-MM ya da YYYY-MM-DD "
+                            "(gun={}) biciminde olmali (ornek 2026-08 ya da "
+                            "2026-08-{:02d}).\n".format(cycle_day, cycle_day))
+                    return 2
+                # "YYYY-MM" verildiginde o ay icinde BASLAYAN doneme
+                # cozulur - datetime(yil, ay, cycle_day) her zaman GECERLI
+                # bir tarihtir (cycle_day 1-28 araliginda dogrulandigi
+                # icin subat dahil her ayda bu gun vardir).
+                month = period_key(datetime.datetime(
+                    parsed_month.year, parsed_month.month, cycle_day), config)
         report = build_month_report(month, config, config_path,
                                     tags=load_tags(args.tags))
     else:

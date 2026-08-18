@@ -33,8 +33,9 @@ doğal dille yapılabilir):
 
 ```
 python scripts/claude_cost.py                     # o anki session
-python scripts/claude_cost.py --month             # bu ayin ozeti
-python scripts/claude_cost.py --month 2026-07     # belirli ay
+python scripts/claude_cost.py --month             # bu donemin ozeti
+python scripts/claude_cost.py --month 2026-07     # o ayda BASLAYAN donem
+python scripts/claude_cost.py --month 2026-08-08  # tam donem anahtari (yalnizca cycle gununde)
 
 python scripts/claude_cost.py --tag-list --untagged                 # etiketsizler
 python scripts/claude_cost.py --tag <id> dahil                      # tek etiket
@@ -42,6 +43,7 @@ python scripts/claude_cost.py --untag <id>                          # etiketi ka
 python scripts/claude_cost.py --tag-project "*Frames*" dahil --yes  # toplu
 
 python scripts/claude_cost.py --set-tracking-start 2026-08  # takip baslangici
+python scripts/claude_cost.py --set-billing-day 8            # fatura donemi 8'den 8'e (1-28)
 python scripts/claude_cost.py --suggest-baseline            # taban tavsiyesi (yazmaz)
 python scripts/claude_cost.py --set-baseline 1500           # tabani yaz
 
@@ -49,7 +51,7 @@ python scripts/claude_cost.py --export out.json --machine workcube  # disa aktar
 
 python scripts/claude_cost.py --idle-gap 10       # ara esigini gecici ez (dk)
 python scripts/claude_cost.py --json              # makine okunur cikti
-python scripts/claude_cost.py --selftest          # 33 dogrulama kontrolu
+python scripts/claude_cost.py --selftest          # 45 dogrulama kontrolu
 ```
 
 ## Örnek çıktı
@@ -162,6 +164,11 @@ Etiketsiz oturumlar sessizce bir tarafa yazılmaz — etiketlemeyi unutursan
 rakamın eksik olduğunu görürsün. `tracking_start_month` ile takibin başladığı
 ay belirlenir; öncesindeki oturumlar hiç görünmez.
 
+**Fatura dönemi takvim ayı olmak zorunda değil.** `billing_cycle_day`
+1'den farklıysa (ör. 8), "ay" aslında `8 Ağustos – 8 Eylül` gibi bir dönemdir.
+Ayın 7'sinde biten büyük bir harcama önceki döneme, 8'inde biteni yeni döneme
+düşer — takvim ayına göre gruplarsan bu ikisi karışır.
+
 Etiketlemeyi elle yapmazsın: `/cost` içinden "etiketsizleri göster" dersin,
 numaralı liste gelir, "1 ve 3 dahil" dersin. UUID görmezsin.
 
@@ -193,6 +200,7 @@ sonra naif/dedup oranını basar. Sabit, makineye özel rakamlara dayanmaz.
   "plan": {"amount": 20.0, "currency": "USD", "label": "Pro"},
   "idle_gap_seconds": 300,
   "tracking_start_month": "2026-08",
+  "billing_cycle_day": 1,
   "baseline_monthly_api_cost": 1500.0,
   "baseline_source": {"set_at": "2026-08-18T09:00:00+00:00", "method": "manual"},
   "pricing_per_mtok": {
@@ -207,6 +215,11 @@ sonra naif/dedup oranını basar. Sabit, makineye özel rakamlara dayanmaz.
   5dk yazma 1.25×, 1sa yazma 2.0×, okuma 0.1×.
 - `idle_gap_seconds` — "aktif süre" hesabında bu eşiği aşan boşluklar düşülür.
 - `tracking_start_month` — takibin başladığı ay; öncesi hiç görünmez.
+- `billing_cycle_day` — fatura döneminin başladığı gün, **1-28** arası
+  (varsayılan `1` = takvim ayı, tam geriye uyumlu). `8` gibi bir değerle
+  dönemler `8 Ağustos - 8 Eylül` şeklinde takvim ayını aşabilir.
+  `--set-billing-day <gün>` ile kalıcı yazılır; 1-28 dışı bir değer reddedilir
+  (her ayda o gün bulunsun diye — 29/30/31 bazı aylarda yok).
 - `baseline_monthly_api_cost` — **dondurulmuş taban.** Kendiliğinden asla
   değişmez; yalnızca `--set-baseline` yazar. `baseline_source` nereden geldiğini
   kaydeder ki aylar sonra rakam açıklanabilsin.
