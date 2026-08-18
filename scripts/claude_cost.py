@@ -15,6 +15,7 @@ token'lar `requestId` bazinda tekillestirilir; yapilmazsa tum rakamlar sisik cik
 
 import argparse
 import json
+import math
 import os
 import sys
 import datetime
@@ -587,15 +588,25 @@ def fixed_plan_cost(session_cost, config):
     Payda ay toplami DEGIL dondurulmus tabandir; bu yuzden rakam session
     bitiminde sabitlenir ve sonradan acilan oturumlardan etkilenmez.
     """
-    baseline = config.get("baseline_monthly_api_cost")
-    if not baseline or float(baseline) <= 0:
+    raw = config.get("baseline_monthly_api_cost")
+    # Elle duzenlenmis config her seyi icerebilir. json modulu Infinity/NaN'i
+    # kabul ettigi icin naif bir ">0" kontrolu Infinity'yi gecirir ve sonuc
+    # sessizce $0.00 cikar. Sayi olmayan / sonlu olmayan / pozitif olmayan
+    # her deger acikca reddedilir.
+    try:
+        baseline = float(raw)
+    except (TypeError, ValueError):
+        baseline = None
+    if baseline is None or not math.isfinite(baseline) or baseline <= 0:
         raise BaselineNotSetError(
-            "Taban set edilmemis. Once '--suggest-baseline' ile bakin, "
-            "sonra '--set-baseline <tutar>' ile yazin.")
-    plan_amount = float(config.get("plan", {}).get("amount", 0.0))
-    ratio = float(session_cost) / float(baseline)
+            "Taban set edilmemis ya da gecersiz (deger: {!r}). Once "
+            "'--suggest-baseline' ile bakin, sonra '--set-baseline <tutar>' "
+            "ile yazin.".format(raw))
+    plan_cfg = config.get("plan") or {}
+    plan_amount = float(plan_cfg.get("amount", 0.0))
+    ratio = float(session_cost) / baseline
     return {"ratio": ratio, "amount": ratio * plan_amount,
-            "baseline": float(baseline)}
+            "baseline": baseline}
 
 
 def suggest_baseline_text(config):
@@ -1083,6 +1094,36 @@ def selftest(config, config_path):
         r21 = True
         det21 = "BaselineNotSetError firlatildi"
     results.append(_ok("21. Taban yokken sayi uretilmiyor", r21, det21))
+
+    print('\n-- 21b. Gecersiz taban --')
+    # json modulu Infinity/NaN kabul eder; elle duzenlenmis config bunlari
+    # tasiyabilir. Naif ">0" kontrolu Infinity'yi gecirir ve sonuc sessizce
+    # $0.00 cikar. Hepsi acikca reddedilmeli.
+    _bad = [None, 0, -5, "abc", float("inf"), float("-inf"), float("nan")]
+    _reddedilen = []
+    for _v in _bad:
+        _c = json.loads(json.dumps(config))
+        _c["baseline_monthly_api_cost"] = None
+        _c2 = dict(_c)
+        _c2["baseline_monthly_api_cost"] = _v
+        try:
+            fixed_plan_cost(100.0, _c2)
+        except BaselineNotSetError:
+            _reddedilen.append(_v)
+        except Exception as _e:
+            _reddedilen.append("HAM-ISTISNA:{}".format(type(_e).__name__))
+    _c_ok = json.loads(json.dumps(config))
+    _c_ok["baseline_monthly_api_cost"] = 1000.0
+    _c_ok["plan"] = {"amount": 20.0, "currency": "USD", "label": "Pro"}
+    _gecerli = abs(fixed_plan_cost(50.0, _c_ok)["amount"] - 1.0) < 1e-9
+    results.append(_ok(
+        "21b. Gecersiz taban (Infinity/NaN/metin/0/negatif) reddediliyor",
+        len(_reddedilen) == len(_bad)
+        and all(not isinstance(x, str) or not x.startswith("HAM-ISTISNA")
+                for x in _reddedilen)
+        and _gecerli,
+        "{}/{} deger reddedildi, gecerli taban calisiyor".format(
+            len(_reddedilen), len(_bad))))
 
     print("\n-- 22b. Aylik kanoniklestirilmesi --")
     import tempfile as _tf22b

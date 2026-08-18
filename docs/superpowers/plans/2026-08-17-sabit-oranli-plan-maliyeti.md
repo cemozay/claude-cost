@@ -625,12 +625,20 @@ def fixed_plan_cost(session_cost, config):
     Payda ay toplami DEGIL dondurulmus tabandir; bu yuzden rakam session
     bitiminde sabitlenir ve sonradan acilan oturumlardan etkilenmez.
     """
-    baseline = config.get("baseline_monthly_api_cost")
-    if not baseline or float(baseline) <= 0:
+    raw = config.get("baseline_monthly_api_cost")
+    # json modulu Infinity/NaN kabul eder; naif ">0" kontrolu Infinity'yi
+    # gecirir ve sonuc sessizce $0.00 cikar. Hepsi acikca reddedilir.
+    try:
+        baseline = float(raw)
+    except (TypeError, ValueError):
+        baseline = None
+    if baseline is None or not math.isfinite(baseline) or baseline <= 0:
         raise BaselineNotSetError(
-            "Taban set edilmemis. Once '--suggest-baseline' ile bakin, "
-            "sonra '--set-baseline <tutar>' ile yazin.")
-    plan_amount = float(config.get("plan", {}).get("amount", 0.0))
+            "Taban set edilmemis ya da gecersiz (deger: {!r}). Once "
+            "'--suggest-baseline' ile bakin, sonra '--set-baseline <tutar>' "
+            "ile yazin.".format(raw))
+    plan_cfg = config.get("plan") or {}
+    plan_amount = float(plan_cfg.get("amount", 0.0))
     ratio = float(session_cost) / float(baseline)
     return {"ratio": ratio, "amount": ratio * plan_amount,
             "baseline": float(baseline)}
