@@ -18,6 +18,7 @@ import json
 import math
 import os
 import sys
+import socket
 import datetime
 import fnmatch
 
@@ -30,6 +31,8 @@ __version__ = "1.1.0"
 CONFIG_PATH = Path.home() / ".claude" / "cost-config.json"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 TAGS_PATH = Path.home() / ".claude" / "cost-tags.json"
+IMPORTS_DIR = Path.home() / ".claude" / "cost-imports"
+EXPORT_VERSION = 1
 
 # Fiyatlar config dosyasinda tutulur ki fiyat degisince kod degismesin.
 # Cache fiyatlari input fiyatinin carpani olarak hesaplanir (API'nin gercek modeli budur).
@@ -492,7 +495,7 @@ def in_tracking_scope(start_dt, config):
     return month_key(start_dt) >= start_month
 
 
-def collect_sessions(config, tags=None, quiet=True):
+def collect_sessions(config, tags=None, quiet=True, include_imports=True):
     """Kapsamdaki tum session'larin ozetini toplar.
 
     Takip baslangicindan onceki session'lar tamamen elenir.
@@ -538,7 +541,97 @@ def collect_sessions(config, tags=None, quiet=True):
         if quiet:
             sys.stderr.close()
             sys.stderr = stderr
+    # Import edilen makineler. Yerel veri KAZANIR: ana makinenin kendi export'u
+    # klasore duserse cift sayilmaz.
+    if include_imports:
+        yerel_ids = set(s["session_id"] for s in out)
+        for s in load_imported_sessions_from(IMPORTS_DIR, tags):
+            if s["session_id"] in yerel_ids:
+                continue
+            if not in_tracking_scope(s["start"], config):
+                continue
+            out.append(s)
     out.sort(key=lambda s: s["start"])
+    return out
+
+
+def export_sessions(config, path, machine=None):
+    """Bu makinenin session ozetlerini yazar.
+
+    HAM TRANSCRIPT GONDERILMEZ - yalnizca sure/token/maliyet ozeti.
+    Zaman damgalari UTC ISO.
+
+    include_imports=False SART: aksi halde bu makine, baska makinelerden
+    import ettigi oturumlari kendi verisiymis gibi yeniden yayar.
+    """
+    sessions = collect_sessions(config, include_imports=False)
+    payload = {
+        "version": EXPORT_VERSION,
+        "machine": machine or socket.gethostname(),
+        "exported_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "sessions": [{
+            "session_id": s["session_id"],
+            "start": s["start"].isoformat(),
+            "end": s["end"].isoformat(),
+            "active_seconds": s["active_seconds"],
+            "wall_seconds": s["wall_seconds"],
+            "cwd": s["cwd"],
+            "gitBranch": s["gitBranch"],
+            "title": s["title"],
+            "request_count": s["request_count"],
+            "tokens": s["tokens"],
+            "cost": s["cost"],
+            "unknown_models": s["unknown_models"],
+        } for s in sessions],
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(path), "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, ensure_ascii=False)
+    return path
+
+
+def load_imported_sessions_from(directory, tags):
+    """Klasordeki export dosyalarini okur. Bozuk dosya atlanir ve UYARILIR."""
+    directory = Path(directory)
+    if not directory.exists():
+        return []
+    out = []
+    seen = set()
+    for fp in sorted(directory.glob("*.json")):
+        try:
+            with open(str(fp), "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            sys.stderr.write("UYARI: import dosyasi okunamadi, atlandi: {} ({})\n"
+                             .format(fp.name, exc))
+            continue
+        if not isinstance(data, dict) or data.get("version") != EXPORT_VERSION:
+            sys.stderr.write("UYARI: import dosyasi surumu bilinmiyor, atlandi: {}\n"
+                             .format(fp.name))
+            continue
+        makine = data.get("machine") or fp.stem
+        for e in data.get("sessions") or []:
+            sid = e.get("session_id")
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            start = parse_ts(e.get("start"))
+            end = parse_ts(e.get("end"))
+            if start is None:
+                continue
+            out.append({
+                "session_id": sid, "title": e.get("title"), "cwd": e.get("cwd"),
+                "gitBranch": e.get("gitBranch"), "slug": None, "path": str(fp),
+                "machine": makine, "start": start, "end": end or start,
+                "active_seconds": float(e.get("active_seconds") or 0.0),
+                "wall_seconds": float(e.get("wall_seconds") or 0.0),
+                "cost": float(e.get("cost") or 0.0),
+                "tokens": e.get("tokens") or {}, "per_model": {},
+                "request_count": int(e.get("request_count") or 0),
+                "unknown_models": e.get("unknown_models") or [],
+                "tag": get_tag(tags, sid),
+            })
     return out
 
 
@@ -1362,6 +1455,88 @@ def selftest(config, config_path):
         "dahil {} / haric {} / etiketsiz {}".format(
             len(_mt20["dahil"]), len(_mt20["haric"]), len(_mt20["etiketsiz"]))))
 
+    print("\n-- 17/18. Export-import turu ve tekillestirme --")
+    import tempfile as _tf2
+    _ed = Path(_tf2.mkdtemp(prefix="claude_cost_imp_"))
+    try:
+        _ef = _ed / "makine1.json"
+        export_sessions(config, _ef, machine="testmakine")
+        with open(str(_ef), "r", encoding="utf-8") as _fh:
+            _payload = json.load(_fh)
+        _local = collect_sessions(config, include_imports=False)
+        _by_id = dict((s["session_id"], s) for s in _local)
+        _same = all(
+            abs(e["cost"] - _by_id[e["session_id"]]["cost"]) < 0.01
+            for e in _payload["sessions"] if e["session_id"] in _by_id)
+        results.append(_ok("18. Export edilen maliyet yerelde hesaplananla ayni",
+                           _same and len(_payload["sessions"]) == len(_local),
+                           "{} session, makine={}".format(
+                               len(_payload["sessions"]), _payload["machine"])))
+
+        # Ayni dosyayi iki farkli adla koy: tekillestirme calismali
+        import shutil as _sh
+        _sh.copy(str(_ef), str(_ed / "makine2.json"))
+        _imported = load_imported_sessions_from(_ed, load_tags())
+        _ids = [s["session_id"] for s in _imported]
+        results.append(_ok("17. Ayni session iki import dosyasinda -> bir kez",
+                           len(_ids) == len(set(_ids)),
+                           "{} kayit, {} benzersiz".format(len(_ids), len(set(_ids)))))
+    finally:
+        try:
+            for _f in _ed.glob("*"):
+                _f.unlink()
+            os.rmdir(str(_ed))
+        except OSError:
+            pass
+
+    print("\n-- 18b. export_sessions include_imports=False korumasi --")
+    import tempfile as _tf18b
+    _gd = Path(_tf18b.mkdtemp(prefix="claude_cost_guard_"))
+    try:
+        # IMPORTS_DIR'a sahte bir import dosyasi koyup gecici olarak
+        # IMPORTS_DIR'i buraya yonlendiriyoruz. export_sessions eger
+        # include_imports=False kullanmiyorsa bu sahte session'i kendi
+        # ciktisina sizdirir - guardin kaldirilmasini yakalayan tek kontrol budur.
+        _fake_sid = "GUARD-TEST-SESSION-ID-DOES-NOT-EXIST"
+        _now18b = datetime.datetime.now(datetime.timezone.utc)
+        _fake_payload = {
+            "version": EXPORT_VERSION, "machine": "sahte-makine",
+            "exported_at": _now18b.isoformat(),
+            "sessions": [{
+                "session_id": _fake_sid, "start": _now18b.isoformat(),
+                "end": (_now18b + datetime.timedelta(minutes=10)).isoformat(),
+                "active_seconds": 600.0, "wall_seconds": 600.0,
+                "cwd": "/fake", "gitBranch": None, "title": "fake",
+                "request_count": 1, "tokens": {}, "cost": 999.0,
+                "unknown_models": [],
+            }],
+        }
+        with open(str(_gd / "sahte.json"), "w", encoding="utf-8") as _fh18b:
+            json.dump(_fake_payload, _fh18b)
+        global IMPORTS_DIR
+        _orig_imports_dir = IMPORTS_DIR
+        IMPORTS_DIR = _gd
+        try:
+            _out18b = _gd / "cikti.json"
+            export_sessions(config, _out18b, machine="guard-test")
+            with open(str(_out18b), "r", encoding="utf-8") as _fh18b2:
+                _guard_payload = json.load(_fh18b2)
+            _guard_ids = set(e["session_id"] for e in _guard_payload["sessions"])
+            results.append(_ok(
+                "18b. export_sessions import edilenleri yeniden yaymiyor",
+                _fake_sid not in _guard_ids,
+                "sahte import session'i export ciktisinda {}".format(
+                    "bulundu (HATA)" if _fake_sid in _guard_ids else "yok (dogru)")))
+        finally:
+            IMPORTS_DIR = _orig_imports_dir
+    finally:
+        try:
+            for _f in _gd.glob("*"):
+                _f.unlink()
+            os.rmdir(str(_gd))
+        except OSError:
+            pass
+
     print("\n-- 22b. Aylik kanoniklestirilmesi --")
     import tempfile as _tf22b
     _td22b = _tf22b.mkdtemp(prefix="claude_cost_track_")
@@ -1500,6 +1675,10 @@ def main(argv=None):
                     help="tabani config'e kalici yaz")
     ap.add_argument("--suggest-baseline", action="store_true",
                     help="taban icin tavsiye goster (hicbir sey yazmaz)")
+    ap.add_argument("--export", metavar="DOSYA",
+                    help="bu makinenin session ozetini yaz")
+    ap.add_argument("--machine", metavar="AD",
+                    help="export'a yazilacak makine adi (varsayilan: hostname)")
     ap.add_argument("--currency", metavar="KOD",
                     help="para birimi (--set-plan ile birlikte kalici)")
     ap.add_argument("--label", metavar="AD", help="plan etiketi (Pro, Max, ...)")
@@ -1585,6 +1764,12 @@ def main(argv=None):
         remove_tag(store, args.untag)
         save_tags(store, args.tags)
         print("Etiket kaldirildi: {} -> etiketsiz".format(args.untag))
+        return 0
+
+    if args.export:
+        written = export_sessions(config, args.export, args.machine)
+        print("Export edildi: {}".format(written))
+        print("  Bu dosyayi ana makinede {} klasorune kopyalayin.".format(IMPORTS_DIR))
         return 0
 
     if args.suggest_baseline:
