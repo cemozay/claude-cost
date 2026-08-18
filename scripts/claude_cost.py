@@ -543,57 +543,39 @@ def collect_sessions(config, tags=None, quiet=True):
 
 
 def month_totals(month, config, quiet=True):
-    """projects/*/*.jsonl taranir; her session BASLANGIC ayina gore gruplanir.
+    """Ay ozetini etiket kirilimiyla dondurur.
 
-    Tum projeler dahil (freelance birden cok repoda calisiyor).
+    Session'lar BASLANGIC ayina gore gruplanir. Tum projeler ve (varsa)
+    import edilmis makineler dahildir.
     """
-    sessions = []
-    stderr = sys.stderr
-    if quiet:
-        sys.stderr = open(os.devnull, "w", encoding="utf-8")  # tarama sirasinda WARN spam'ini bastir
-    try:
-        for path in all_session_files():
-            parsed = parse_session(path)
-            if not parsed["timestamps"] or not parsed["requests"]:
-                continue
-            start = parsed["timestamps"][0]
-            if month_key(start) != month:
-                continue
-            priced = price_requests(parsed["requests"], config)
-            sessions.append({
-                "path": str(path),
-                "session_id": parsed["meta"].get("sessionId") or Path(path).stem,
-                "title": parsed["meta"].get("title"),
-                "slug": parsed["meta"].get("slug"),
-                "start": start,
-                "cost": priced["total_cost"],
-                "requests": priced["request_count"],
-                "unknown_models": priced["unknown_models"],
-            })
-    finally:
-        if quiet:
-            sys.stderr.close()
-            sys.stderr = stderr
+    sessions = [s for s in collect_sessions(config, quiet=quiet)
+                if month_key(s["start"]) == month]
+    dahil = [s for s in sessions if s["tag"] is True]
+    haric = [s for s in sessions if s["tag"] is False]
+    etiketsiz = [s for s in sessions if s["tag"] is None]
 
-    sessions.sort(key=lambda s: s["start"])
-    total = sum(s["cost"] for s in sessions)
-    return {"month": month, "sessions": sessions, "total_cost": total,
-            "session_count": len(sessions)}
+    dahil_cost = sum(s["cost"] for s in dahil)
+    out = {
+        "month": month,
+        "dahil": dahil, "haric": haric, "etiketsiz": etiketsiz,
+        "dahil_cost": dahil_cost,
+        "haric_cost": sum(s["cost"] for s in haric),
+        "etiketsiz_cost": sum(s["cost"] for s in etiketsiz),
+        "tum_cost": sum(s["cost"] for s in sessions),
+        "utilization": None, "plan_cost": None, "baseline": None,
+        "baseline_error": None,
+    }
+    try:
+        fc = fixed_plan_cost(dahil_cost, config)
+        out["utilization"] = fc["ratio"]
+        out["plan_cost"] = fc["amount"]
+        out["baseline"] = fc["baseline"]
+    except BaselineNotSetError as exc:
+        out["baseline_error"] = str(exc)
+    return out
 
 
 # ---------------------------------------------------------------- 7. plan payi
-
-def plan_share(session_cost, month_cost, plan_amount):
-    """Agirlik ham token degil, API-karsiligi MALIYET.
-
-    Output token input'un 5 katı maliyetli oldugu icin tek savunulabilir
-    dagitim anahtari budur.
-    """
-    if month_cost <= 0:
-        return {"ratio": 0.0, "amount": 0.0}
-    ratio = session_cost / month_cost
-    return {"ratio": ratio, "amount": ratio * plan_amount}
-
 
 class BaselineNotSetError(Exception):
     """Taban set edilmemis. Rapor sayi uydurmaz, durur."""
@@ -759,23 +741,24 @@ def render_text(report):
         y, mo = mk.split("-")
         etiket = "  (ay ici, gecici)" if is_current_month(mk) else ""
         plan = report["plan"]
-        L.append("Aylik ozet - {} {}{}".format(TR_MONTHS[int(mo)], y, etiket))
-        L.append("Plan: {} {}".format(plan.get("label", ""),
-                                      fmt_money(plan["amount"], cur)))
+        L.append("{} {}{}".format(TR_MONTHS[int(mo)], y, etiket))
         L.append("")
-        L.append("  {:<40} {:>10} {:>8} {:>10}".format(
-            "Session", "API-karsl.", "Pay", "Plan payi"))
-        for s in m["sessions"]:
-            share = plan_share(s["cost"], m["total_cost"], plan["amount"])
-            name = (s["title"] or s["session_id"])[:38]
-            L.append("  {:<40} {:>10} {:>7.1f}% {:>10}".format(
-                name, fmt_money(s["cost"], cur), share["ratio"] * 100.0,
-                fmt_money(share["amount"], cur)))
-        L.append("")
-        L.append("  {:<40} {:>10} {:>8} {:>10}".format(
-            "TOPLAM ({} session)".format(m["session_count"]),
-            fmt_money(m["total_cost"], cur), "100.0%",
-            fmt_money(plan["amount"] if m["total_cost"] > 0 else 0.0, cur)))
+        L.append("  Dahil     : {:>3} session   {:>10}".format(
+            len(m["dahil"]), fmt_money(m["dahil_cost"], cur)))
+        if m["baseline_error"]:
+            L.append("  {}".format(m["baseline_error"]))
+        else:
+            L.append("  Taban     : {}/ay  ->  kullanim %{:.1f}  ->  "
+                     "plan maliyeti {}".format(
+                         fmt_money(m["baseline"], cur),
+                         m["utilization"] * 100.0,
+                         fmt_money(m["plan_cost"], cur)))
+        if m["etiketsiz"]:
+            L.append("  Etiketsiz : {:>3} session   {:>10}   (hesaba KATILMADI)".format(
+                len(m["etiketsiz"]), fmt_money(m["etiketsiz_cost"], cur)))
+        if m["haric"]:
+            L.append("  Haric     : {:>3} session   {:>10}".format(
+                len(m["haric"]), fmt_money(m["haric_cost"], cur)))
 
     if report.get("unknown_models"):
         L.append("")
@@ -875,15 +858,15 @@ def build_session_report(path, config, config_path, tags=None):
 
 def build_month_report(month, config, config_path):
     totals = month_totals(month, config)
-    plan = config.get("plan", DEFAULT_CONFIG["plan"])
     unknown = set()
-    for s in totals["sessions"]:
-        unknown.update(s.get("unknown_models") or {})
+    for grup in (totals["dahil"], totals["haric"], totals["etiketsiz"]):
+        for s in grup:
+            unknown.update(s.get("unknown_models") or [])
     return {
         "mode": "month",
         "version": __version__,
         "config_path": str(config_path),
-        "plan": plan,
+        "plan": config.get("plan", DEFAULT_CONFIG["plan"]),
         "month": totals,
         "unknown_models": sorted(unknown),
     }
@@ -1034,28 +1017,47 @@ def selftest(config, config_path):
     else:
         print("[SKIP] 6. fiyatlanabilen model yok")
 
-    print("\n-- 7. Aylik + plan payi --")
-    mk = month_key(d["start"]) if d["start"] else datetime.datetime.now().strftime("%Y-%m")
-    mt = month_totals(mk, config)
-    plan_amt = float(config["plan"]["amount"])
-    shares = [plan_share(s["cost"], mt["total_cost"], plan_amt)["amount"]
-              for s in mt["sessions"]]
-    total_share = sum(shares)
-    results.append(_ok("7. Tum session paylarinin toplami = plan tutari (+-0.01)",
-                       mt["total_cost"] <= 0 or abs(total_share - plan_amt) <= 0.01,
-                       "{} session, toplam pay {:.4f} vs plan {:.2f}".format(
-                           mt["session_count"], total_share, plan_amt)))
+    print("\n-- 7. Aylik ozet - taban kablolamasi --")
+    # month_totals artik plan_share() DEGIL fixed_plan_cost() cagiriyor (ay
+    # toplami $20'ye civilenmiyor). Beklenen deger BAGIMSIZ hesaplanip
+    # (dahil_cost / taban x plan) month_totals'un urettigi utilization/plan_cost
+    # ile karsilastiriliyor -- fonksiyonu tekrar cagirip kendi kendini
+    # dogrulayan sahte bir kontrole donusmesin diye. En az bir dahil-etiketli
+    # session'in kesin bulundugu icinde bulunulan ay kullanilir (d["start"]'in
+    # ait oldugu ay etiketsiz/haric agirlikli olabilir, o zaman dahil_cost 0
+    # kalir ve asagidaki oran/tutar karsilastirmalari sessizce anlamsizlasir).
+    mk = datetime.datetime.now().strftime("%Y-%m")
+    _c7 = json.loads(json.dumps(config))
+    _c7["baseline_monthly_api_cost"] = 1000.0
+    _c7["plan"] = {"amount": 20.0, "currency": "USD", "label": "Pro"}
+    mt = month_totals(mk, _c7)
+    _toplam_ayri7 = abs((mt["dahil_cost"] + mt["haric_cost"] + mt["etiketsiz_cost"])
+                        - mt["tum_cost"]) < 0.01
+    _beklenen_oran7 = mt["dahil_cost"] / 1000.0
+    _beklenen_tutar7 = _beklenen_oran7 * 20.0
+    results.append(_ok(
+        "7. Aylik dahil toplami tabana bolunup dogru kullanim orani/plan "
+        "maliyeti uretiyor",
+        mt["dahil_cost"] > 0  # sifirsa oran/tutar karsilastirmalari 0==0 olur, anlamsizlasir
+        and mt["baseline_error"] is None
+        and abs(mt["utilization"] - _beklenen_oran7) < 1e-9
+        and abs(mt["plan_cost"] - _beklenen_tutar7) < 1e-9
+        and _toplam_ayri7,
+        "{} dahil session, dahil_cost {} -> kullanim %{:.1f}".format(
+            len(mt["dahil"]), fmt_money(mt["dahil_cost"]), mt["utilization"] * 100.0)))
 
-    print("\n-- 8. Plan override --")
-    cfg3 = json.loads(json.dumps(config))
-    cfg3["plan"]["amount"] = plan_amt * 5
-    s_before = plan_share(1.0, 10.0, plan_amt)
-    s_after = plan_share(1.0, 10.0, plan_amt * 5)
-    results.append(_ok("8. Plan 5x iken yuzde sabit, tutar 5x",
-                       abs(s_before["ratio"] - s_after["ratio"]) < 1e-9
-                       and abs(s_after["amount"] - s_before["amount"] * 5) < 1e-9,
-                       "oran {:.4f} sabit, tutar {:.2f} -> {:.2f}".format(
-                           s_before["ratio"], s_before["amount"], s_after["amount"])))
+    print("\n-- 8. Plan override (aylik) --")
+    _c8 = json.loads(json.dumps(_c7))
+    _c8["plan"]["amount"] = _c7["plan"]["amount"] * 5
+    mt5 = month_totals(mk, _c8)
+    results.append(_ok(
+        "8. Plan 5x iken kullanim orani sabit, plan maliyeti 5x",
+        mt["baseline_error"] is None and mt5["baseline_error"] is None
+        and abs(mt["utilization"] - mt5["utilization"]) < 1e-9
+        and abs(mt5["plan_cost"] - mt["plan_cost"] * 5) < 1e-9,
+        "oran %{:.1f} sabit, tutar {} -> {}".format(
+            mt["utilization"] * 100.0, fmt_money(mt["plan_cost"]),
+            fmt_money(mt5["plan_cost"]))))
 
     print("\n-- 9. Bozuk veri dayanikliligi --")
     import tempfile
@@ -1347,6 +1349,19 @@ def selftest(config, config_path):
         "coktu={} | [SABIT]-yok={} | acik-mesaj={}".format(
             _coktu19e, "[SABIT]" not in _txt19e,
             "fixed_cost eksik" in _txt19e)))
+
+    print("\n-- 20. Etiketsiz izolasyonu --")
+    _mk20 = datetime.datetime.now().strftime("%Y-%m")
+    _mt20 = month_totals(_mk20, config)
+    _toplam_ayri = (abs((_mt20["dahil_cost"] + _mt20["haric_cost"]
+                         + _mt20["etiketsiz_cost"])
+                        - _mt20["tum_cost"]) < 0.01)
+    _etiketsiz_haric = all(s["tag"] is True for s in _mt20["dahil"])
+    results.append(_ok(
+        "20. Etiketsizler dahil toplamina girmiyor, ayri sayiliyor",
+        _toplam_ayri and _etiketsiz_haric,
+        "dahil {} / haric {} / etiketsiz {}".format(
+            len(_mt20["dahil"]), len(_mt20["haric"]), len(_mt20["etiketsiz"]))))
 
     print("\n-- 22b. Aylik kanoniklestirilmesi --")
     import tempfile as _tf22b
