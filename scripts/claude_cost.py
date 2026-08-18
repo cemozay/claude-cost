@@ -19,12 +19,13 @@ import math
 import os
 import sys
 import socket
+import shutil
 import datetime
 import fnmatch
 
 from pathlib import Path
 
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 # ---------------------------------------------------------------- sabitler
 
@@ -601,27 +602,56 @@ def collect_sessions(config, tags=None, quiet=True, include_imports=True):
     if quiet:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
     try:
+        # Ayni sessionId birden fazla DOSYADA olabilir: oturum --resume /
+        # --continue ile surdurulunce Claude Code onceki gecmisi yeni bir
+        # dosyaya kopyalar ve iki dosya da ayni sessionId'yi tasir. requestId
+        # tekillestirmesi dosya ICINDE yapildigi icin, birlestirmezsek oturum
+        # iki kere sayilir.
+        gruplar = {}
+        sira = []
         for path in all_session_files():
             parsed = parse_session(path)
             if not parsed["timestamps"] or not parsed["requests"]:
                 continue
-            start = parsed["timestamps"][0]
+            sid = parsed["meta"].get("sessionId") or Path(path).stem
+            slot = gruplar.get(sid)
+            if slot is None:
+                gruplar[sid] = {
+                    "requests": dict(parsed["requests"]),
+                    "timestamps": list(parsed["timestamps"]),
+                    "meta": parsed["meta"],
+                    "path": str(path),
+                }
+                sira.append(sid)
+                continue
+            slot["requests"].update(parsed["requests"])
+            slot["timestamps"].extend(parsed["timestamps"])
+            # Kanonik dosya: adi sessionId ile eslesen asil oturum dosyasi.
+            if Path(path).stem == sid:
+                slot["meta"] = parsed["meta"]
+                slot["path"] = str(path)
+
+        for sid in sira:
+            slot = gruplar[sid]
+            zamanlar = sorted(slot["timestamps"])
+            start = zamanlar[0]
+            # Kapsam, birlesmis oturumun GERCEK baslangicina gore belirlenir.
             if not in_tracking_scope(start, config):
                 continue
-            priced = price_requests(parsed["requests"], config)
-            dur = compute_duration(parsed["timestamps"],
+            priced = price_requests(slot["requests"], config)
+            dur = compute_duration(zamanlar,
                                    float(config.get("idle_gap_seconds", 300)))
-            sid = parsed["meta"].get("sessionId") or Path(path).stem
+            meta = slot["meta"]
             out.append({
                 "session_id": sid,
-                "title": parsed["meta"].get("title"),
-                "cwd": parsed["meta"].get("cwd"),
-                "gitBranch": parsed["meta"].get("gitBranch"),
-                "slug": parsed["meta"].get("slug"),
-                "path": str(path),
+                "title": meta.get("title"),
+                "cwd": meta.get("cwd"),
+                "gitBranch": meta.get("gitBranch"),
+                "slug": meta.get("slug"),
+                "path": slot["path"],
                 "machine": "(yerel)",
                 "start": start,
-                "end": parsed["timestamps"][-1],
+                "end": zamanlar[-1],
                 "active_seconds": dur["active"],
                 "wall_seconds": dur["wall"],
                 "cost": priced["total_cost"],
@@ -1293,7 +1323,7 @@ def selftest(config, config_path):
     # session'in kesin bulundugu icinde bulunulan ay kullanilir (d["start"]'in
     # ait oldugu ay etiketsiz/haric agirlikli olabilir, o zaman dahil_cost 0
     # kalir ve asagidaki oran/tutar karsilastirmalari sessizce anlamsizlasir).
-    mk = datetime.datetime.now().strftime("%Y-%m")
+    mk = period_key(datetime.datetime.now(), config)
     _c7 = json.loads(json.dumps(config))
     _c7["baseline_monthly_api_cost"] = 1000.0
     _c7["plan"] = {"amount": 20.0, "currency": "USD", "label": "Pro"}
@@ -1736,7 +1766,7 @@ def selftest(config, config_path):
     _tp27_tags = Path(_td27) / "tags.json"
     try:
         save_tags({"version": 1, "tags": {}}, _tp27_tags)  # bos, gercek depodan FARKLI
-        _mk27 = datetime.datetime.now().strftime("%Y-%m")
+        _mk27 = period_key(datetime.datetime.now(), config)
 
         _out27a = _io26.StringIO()
         with _ctx26.redirect_stdout(_out27a):
@@ -1765,7 +1795,7 @@ def selftest(config, config_path):
             pass
 
     print("\n-- 20. Etiketsiz izolasyonu --")
-    _mk20 = datetime.datetime.now().strftime("%Y-%m")
+    _mk20 = period_key(datetime.datetime.now(), config)
     _mt20 = month_totals(_mk20, config)
     _toplam_ayri = (abs((_mt20["dahil_cost"] + _mt20["haric_cost"]
                          + _mt20["etiketsiz_cost"])
@@ -1798,6 +1828,61 @@ def selftest(config, config_path):
         "dahil {} / haric {} / etiketsiz {}  |  ham-int-1-etiket dahil-disi={}".format(
             len(_mt20["dahil"]), len(_mt20["haric"]), len(_mt20["etiketsiz"]),
             _truthy_disinda20)))
+
+    print("\n-- 18c. Ayni session'in birden fazla dosyasi --")
+    # Oturum --resume/--continue ile surdurulunce Claude Code onceki gecmisi
+    # YENI bir dosyaya kopyalar; iki dosya da ayni sessionId'yi tasir.
+    # requestId tekillestirmesi dosya ICINDE yapildigi icin bu, oturumun
+    # maliyetini iki kere sayardi (gercek veride $165.66 fazla).
+    import tempfile as _tf18c
+    _td18c = Path(_tf18c.mkdtemp(prefix="claude_cost_resume_"))
+    _kayitli_pd18c = PROJECTS_DIR
+    try:
+        _pdir18c = _td18c / "proj"
+        _pdir18c.mkdir(parents=True, exist_ok=True)
+        _sid18c = "ssss1111-2222-3333-4444-555566667777"
+
+        def _yaz18c(fname, rids):
+            _satir = []
+            for _i, _rid in enumerate(rids):
+                _satir.append(json.dumps({
+                    "type": "assistant",
+                    "sessionId": _sid18c,
+                    "cwd": "/tmp/proj",
+                    "requestId": _rid,
+                    "timestamp": "2026-05-01T{:02d}:00:00.000Z".format(1 + _i),
+                    "message": {"model": "test-model-x",
+                                "usage": {"input_tokens": 1000000,
+                                          "output_tokens": 0}},
+                }))
+            with open(str(_pdir18c / fname), "w", encoding="utf-8") as _fh:
+                _fh.write("\n".join(_satir) + "\n")
+
+        # B, A'nin gecmisini aynen tasiyor + bir yeni istek (r4).
+        _yaz18c("aaaa1111-0000-0000-0000-000000000000.jsonl", ["r1", "r2", "r3"])
+        _yaz18c("bbbb2222-0000-0000-0000-000000000000.jsonl",
+                ["r1", "r2", "r3", "r4"])
+
+        _c18c = json.loads(json.dumps(config))
+        _c18c["tracking_start_month"] = "2020-01"
+        _c18c["pricing_per_mtok"]["test-model-x"] = {"input": 1.0, "output": 1.0}
+
+        globals()["PROJECTS_DIR"] = _td18c
+        _got18c = collect_sessions(_c18c, tags={"version": 1, "tags": {}},
+                                   include_imports=False)
+        _benim18c = [s for s in _got18c if s["session_id"] == _sid18c]
+        results.append(_ok(
+            "18c. Ayni sessionId'yi tasiyan iki dosya tek session'a birlesir, "
+            "requestId'ler tekillesir",
+            len(_benim18c) == 1 and _benim18c[0]["request_count"] == 4
+            and abs(_benim18c[0]["cost"] - 4.0) < 0.001,
+            "kayit={} request={} maliyet={}".format(
+                len(_benim18c),
+                _benim18c[0]["request_count"] if _benim18c else None,
+                round(_benim18c[0]["cost"], 3) if _benim18c else None)))
+    finally:
+        globals()["PROJECTS_DIR"] = _kayitli_pd18c
+        shutil.rmtree(str(_td18c), ignore_errors=True)
 
     print("\n-- 17/18. Export-import turu ve tekillestirme --")
     import tempfile as _tf2
