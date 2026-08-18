@@ -1148,6 +1148,48 @@ def selftest(config, config_path):
         and abs(_cift - 2.0) < 1e-9,
         "50/1000x20 = {:.4f} (iki cagride ayni), 100 -> {:.4f}".format(_once, _cift)))
 
+    print("\n-- 19b. render_text entegrasyonu (dahil/haric/etiketsiz/tabansiz) --")
+    # 19 formulu (fixed_plan_cost) dogrudan cagirarak dogruluyor; wiring'i,
+    # yani build_session_report -> render_text yolunu, dogrulamiyor. Burada
+    # gercek yol suruluyor ve tek guvenilir isaret olan "[SABIT]" etiketinin
+    # varligina/yoklugna bakiliyor.
+    _c19b = json.loads(json.dumps(config))
+    _c19b["baseline_monthly_api_cost"] = 1000.0
+    _c19b["plan"] = {"amount": 20.0, "currency": "USD", "label": "Pro"}
+    _path19b = biggest
+    _probe19b = build_session_report(_path19b, _c19b, config_path,
+                                     tags={"version": 1, "tags": {}})
+    _sid19b = _probe19b["session"]["session_id"]
+
+    def _store19b(value):
+        store = {"version": 1, "tags": {}}
+        if value is not None:
+            store["tags"][_sid19b] = value
+        return store
+
+    _txt19b_dahil = render_text(build_session_report(
+        _path19b, _c19b, config_path, tags=_store19b(True)))
+    _r19b_dahil = "[SABIT]" in _txt19b_dahil
+
+    _txt19b_haric = render_text(build_session_report(
+        _path19b, _c19b, config_path, tags=_store19b(False)))
+    _r19b_haric = "[SABIT]" not in _txt19b_haric and "HARIC" in _txt19b_haric
+
+    _txt19b_etiketsiz = render_text(build_session_report(
+        _path19b, _c19b, config_path, tags=_store19b(None)))
+    _r19b_etiketsiz = "[SABIT]" not in _txt19b_etiketsiz and "--tag" in _txt19b_etiketsiz
+
+    _c19b_tabansiz = json.loads(json.dumps(_c19b))
+    _c19b_tabansiz["baseline_monthly_api_cost"] = None
+    _txt19b_tabansiz = render_text(build_session_report(
+        _path19b, _c19b_tabansiz, config_path, tags=_store19b(True)))
+    _r19b_tabansiz = "[SABIT]" not in _txt19b_tabansiz
+
+    results.append(_ok(
+        "19b. render_text dort durumu dogru basiyor/basmiyor",
+        _r19b_dahil and _r19b_haric and _r19b_etiketsiz and _r19b_tabansiz,
+        "dahil->[SABIT] var; haric/etiketsiz/tabansiz->[SABIT] yok"))
+
     print("\n-- 22b. Aylik kanoniklestirilmesi --")
     import tempfile as _tf22b
     _td22b = _tf22b.mkdtemp(prefix="claude_cost_track_")
