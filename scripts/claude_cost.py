@@ -1033,6 +1033,39 @@ def selftest(config, config_path):
         except OSError:
             pass
 
+    print("\n-- 23. --tag-project onay kapisi --")
+    import tempfile as _tf23
+    import contextlib as _ctx23
+    import io as _io23
+    _td23 = _tf23.mkdtemp(prefix="claude_cost_gate_")
+    _tp23_tags = Path(_td23) / "tags.json"
+    _tp23_cfg = Path(_td23) / "cost-config.json"
+    try:
+        with _ctx23.redirect_stdout(_io23.StringIO()):
+            _rc23_noyes = main(["--tag-project", "*", "dahil",
+                               "--tags", str(_tp23_tags), "--config", str(_tp23_cfg)])
+        _no_write23 = (not _tp23_tags.exists()) or (
+            not load_tags(_tp23_tags).get("tags"))
+        with _ctx23.redirect_stdout(_io23.StringIO()):
+            _rc23_yes = main(["--tag-project", "*", "dahil",
+                             "--tags", str(_tp23_tags), "--config", str(_tp23_cfg),
+                             "--yes"])
+        _did_write23 = _tp23_tags.exists() and bool(load_tags(_tp23_tags).get("tags"))
+        results.append(_ok(
+            "23. --tag-project onay kapisi: --yes yoksa yazma yok, cikis 3",
+            _rc23_noyes == 3 and _no_write23 and _rc23_yes == 0 and _did_write23,
+            "--yes yok: cikis={}, yazildi={} | --yes var: cikis={}, yazildi={}".format(
+                _rc23_noyes, not _no_write23, _rc23_yes, _did_write23)))
+    finally:
+        try:
+            if _tp23_tags.exists():
+                _tp23_tags.unlink()
+            if _tp23_cfg.exists():
+                _tp23_cfg.unlink()
+            os.rmdir(_td23)
+        except OSError:
+            pass
+
     print("\n-- 16b. collect_sessions --")
     _sessions = collect_sessions(config)
     _has_fields = all(
@@ -1117,6 +1150,8 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true", help="makine okunur cikti")
     ap.add_argument("--selftest", action="store_true", help="dogrulama modu")
     ap.add_argument("--config", metavar="YOL", help="alternatif config dosyasi")
+    ap.add_argument("--tags", metavar="YOL",
+                    help="alternatif etiket deposu dosyasi")
     ap.add_argument("--version", action="version", version=__version__)
     args = ap.parse_args(argv)
 
@@ -1174,25 +1209,25 @@ def main(argv=None):
             sys.stderr.write("HATA: etiket 'dahil' veya 'haric' olmali "
                              "('{}' verildi).\n".format(word))
             return 2
-        known = set(s["session_id"] for s in collect_sessions(config))
+        store = load_tags(args.tags)
+        known = set(s["session_id"] for s in collect_sessions(config, tags=store))
         if sid not in known:
             sys.stderr.write("HATA: '{}' kapsamda bir session degil. "
                              "--tag-list ile bakin.\n".format(sid))
             return 2
-        store = load_tags()
         set_tag(store, sid, included)
-        written = save_tags(store)
+        written = save_tags(store, args.tags)
         print("Etiketlendi: {} -> {}".format(sid, TAG_LABELS[included]))
         print("  {}".format(written))
         return 0
 
     if args.untag:
-        store = load_tags()
+        store = load_tags(args.tags)
         if get_tag(store, args.untag) is None:
             print("Zaten etiketsiz: {}".format(args.untag))
             return 0
         remove_tag(store, args.untag)
-        save_tags(store)
+        save_tags(store, args.tags)
         print("Etiket kaldirildi: {} -> etiketsiz".format(args.untag))
         return 0
 
@@ -1205,7 +1240,8 @@ def main(argv=None):
             return 2
         # fnmatch buyuk/kucuk harf duyarsiz karsilastirilir: Windows yollari icin sart.
         d = desen.lower()
-        hedef = [s for s in collect_sessions(config)
+        display_store = load_tags(args.tags)
+        hedef = [s for s in collect_sessions(config, tags=display_store)
                  if s["cwd"] and fnmatch.fnmatch(s["cwd"].lower(), d)]
         if not hedef:
             print("Desene uyan session yok: {}".format(desen))
@@ -1220,15 +1256,15 @@ def main(argv=None):
         if not args.yes:
             sys.stderr.write("Onay gerekli: ayni komutu --yes ile calistirin.\n")
             return 3
-        store = load_tags()
+        store = load_tags(args.tags)
         for s in hedef:
             set_tag(store, s["session_id"], included)
-        save_tags(store)
+        save_tags(store, args.tags)
         print("{} session etiketlendi.".format(len(hedef)))
         return 0
 
     if args.tag_list:
-        print(render_tag_list(collect_sessions(config),
+        print(render_tag_list(collect_sessions(config, tags=load_tags(args.tags)),
                               only_untagged=args.untagged))
         return 0
 
