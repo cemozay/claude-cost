@@ -934,14 +934,27 @@ def selftest(config, config_path):
         "2026-08 esigi: Agu ici -> True, Tem -> False, esik yokken -> True"))
 
     print("\n-- 22b. Aylik kanoniklestirilmesi --")
-    _canonical = datetime.datetime.strptime("2026-1", "%Y-%m").strftime("%Y-%m")
-    _c22b = json.loads(json.dumps(config))
-    _c22b["tracking_start_month"] = _canonical
-    _t_aug = parse_ts("2026-08-15T10:00:00.000Z")
-    results.append(_ok(
-        "22b. Sifir-Padded aylar sira saglamasi (2026-1 -> 2026-01 -> Agu dahil)",
-        _canonical == "2026-01" and in_tracking_scope(_t_aug, _c22b) is True,
-        "2026-1 -> {} -> {:.1f}%".format(_canonical, 100.0 if in_tracking_scope(_t_aug, _c22b) else 0.0)))
+    import tempfile as _tf22b
+    _td22b = _tf22b.mkdtemp(prefix="claude_cost_track_")
+    _tp22b = Path(_td22b) / "cost-config.json"
+    try:
+        main(["--set-tracking-start", "2026-1", "--config", str(_tp22b)])
+        with open(str(_tp22b), "r", encoding="utf-8") as _f22b:
+            _written22b = json.load(_f22b)
+        _canonical = _written22b.get("tracking_start_month")
+        _t_aug = parse_ts("2026-08-15T10:00:00.000Z")
+        _c22b_scope = json.loads(json.dumps(_written22b))
+        results.append(_ok(
+            "22b. Sifir-Padded aylar sira saglamasi (2026-1 -> 2026-01 -> Agu dahil)",
+            _canonical == "2026-01" and in_tracking_scope(_t_aug, _c22b_scope) is True,
+            "gercek CLI uzerinden yazilan deger dolgulu kanonik bicimde ve "
+            "Agustos kapsam icinde bulundu"))
+    finally:
+        try:
+            _tp22b.unlink()
+            os.rmdir(_td22b)
+        except OSError:
+            pass
 
     print("\n-- 10. Capraz platform (statik gozden gecirme) --")
     src = Path(__file__).read_text(encoding="utf-8")
@@ -1021,12 +1034,12 @@ def main(argv=None):
         if args.set_tracking_start is not None:
             txt = args.set_tracking_start.strip()
             try:
-                datetime.datetime.strptime(txt, "%Y-%m")
+                parsed = datetime.datetime.strptime(txt, "%Y-%m")
             except ValueError:
                 sys.stderr.write("HATA: --set-tracking-start YYYY-MM biciminde "
                                  "olmali (ornek 2026-08).\n")
                 return 2
-            config["tracking_start_month"] = datetime.datetime.strptime(txt, "%Y-%m").strftime("%Y-%m")
+            config["tracking_start_month"] = parsed.strftime("%Y-%m")
         if args.currency:
             config["plan"]["currency"] = args.currency
         if args.label:
