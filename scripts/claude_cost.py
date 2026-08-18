@@ -467,6 +467,56 @@ def in_tracking_scope(start_dt, config):
     return month_key(start_dt) >= start_month
 
 
+def collect_sessions(config, tags=None, quiet=True):
+    """Kapsamdaki tum session'larin ozetini toplar.
+
+    Takip baslangicindan onceki session'lar tamamen elenir.
+    """
+    if tags is None:
+        tags = load_tags()
+    out = []
+    stderr = sys.stderr
+    if quiet:
+        sys.stderr = open(os.devnull, "w")
+    try:
+        for path in all_session_files():
+            parsed = parse_session(path)
+            if not parsed["timestamps"] or not parsed["requests"]:
+                continue
+            start = parsed["timestamps"][0]
+            if not in_tracking_scope(start, config):
+                continue
+            priced = price_requests(parsed["requests"], config)
+            dur = compute_duration(parsed["timestamps"],
+                                   float(config.get("idle_gap_seconds", 300)))
+            sid = parsed["meta"].get("sessionId") or Path(path).stem
+            out.append({
+                "session_id": sid,
+                "title": parsed["meta"].get("title"),
+                "cwd": parsed["meta"].get("cwd"),
+                "gitBranch": parsed["meta"].get("gitBranch"),
+                "slug": parsed["meta"].get("slug"),
+                "path": str(path),
+                "machine": "(yerel)",
+                "start": start,
+                "end": parsed["timestamps"][-1],
+                "active_seconds": dur["active"],
+                "wall_seconds": dur["wall"],
+                "cost": priced["total_cost"],
+                "tokens": priced["totals"],
+                "per_model": priced["per_model"],
+                "request_count": priced["request_count"],
+                "unknown_models": sorted(priced["unknown_models"]),
+                "tag": get_tag(tags, sid),
+            })
+    finally:
+        if quiet:
+            sys.stderr.close()
+            sys.stderr = stderr
+    out.sort(key=lambda s: s["start"])
+    return out
+
+
 def month_totals(month, config, quiet=True):
     """projects/*/*.jsonl taranir; her session BASLANGIC ayina gore gruplanir.
 
@@ -641,6 +691,32 @@ def render_json(report):
             return str(o)
         return str(o)
     return json.dumps(report, indent=2, ensure_ascii=False, default=default)
+
+
+def render_tag_list(sessions, only_untagged=False):
+    rows = [s for s in sessions
+            if not only_untagged or s["tag"] is None]
+    if not rows:
+        return "Listelenecek session yok." if not only_untagged \
+            else "Etiketsiz session yok - hepsi isaretlenmis."
+    L = []
+    baslik = "Etiketsiz oturumlar" if only_untagged else "Oturumlar"
+    L.append("{} ({} adet):".format(baslik, len(rows)))
+    L.append("")
+    for i, s in enumerate(rows, 1):
+        st = to_local(s["start"])
+        proje = Path(s["cwd"]).name if s["cwd"] else (s["slug"] or "-")
+        L.append("{:>3}. {}  {:<34} {:>10} {:>10}  {:<16} [{}]".format(
+            i,
+            "{:>2} {} {}".format(st.day, TR_MONTHS[st.month][:3],
+                                 st.strftime("%H:%M")),
+            (s["title"] or s["session_id"])[:34],
+            fmt_dur(s["active_seconds"]),
+            fmt_money(s["cost"]),
+            proje[:16],
+            TAG_LABELS[s["tag"]]))
+        L.append("     {}".format(s["session_id"]))
+    return "\n".join(L)
 
 
 # ---------------------------------------------------------------- rapor kurma
@@ -956,6 +1032,17 @@ def selftest(config, config_path):
         except OSError:
             pass
 
+    print("\n-- 16b. collect_sessions --")
+    _sessions = collect_sessions(config)
+    _has_fields = all(
+        all(k in s for k in ("session_id", "start", "cost", "tag", "active_seconds"))
+        for s in _sessions)
+    _sorted = all(_sessions[i]["start"] <= _sessions[i + 1]["start"]
+                  for i in range(len(_sessions) - 1))
+    results.append(_ok("16b. collect_sessions alanlari tam ve start'a gore sirali",
+                       _has_fields and _sorted and len(_sessions) > 0,
+                       "{} session".format(len(_sessions))))
+
     print("\n-- 10. Capraz platform (statik gozden gecirme) --")
     src = Path(__file__).read_text(encoding="utf-8")
     # Selftest'in KENDI govdesi taramadan cikarilir: asagidaki kontrollerin
@@ -1011,6 +1098,14 @@ def main(argv=None):
                     help="ara esigini (dakika) config'e kalici yaz")
     ap.add_argument("--set-tracking-start", metavar="YYYY-MM",
                     help="takip baslangic ayini config'e kalici yaz")
+    ap.add_argument("--tag", nargs=2, metavar=("SESSION-ID", "dahil|haric"),
+                    help="tek session'i etiketle")
+    ap.add_argument("--untag", metavar="SESSION-ID",
+                    help="etiketi kaldir (etiketsize dondur)")
+    ap.add_argument("--tag-list", action="store_true",
+                    help="session'lari etiketleriyle listele")
+    ap.add_argument("--untagged", action="store_true",
+                    help="--tag-list ile: yalnizca etiketsizleri goster")
     ap.add_argument("--currency", metavar="KOD",
                     help="para birimi (--set-plan ile birlikte kalici)")
     ap.add_argument("--label", metavar="AD", help="plan etiketi (Pro, Max, ...)")
@@ -1066,6 +1161,40 @@ def main(argv=None):
     if args.currency:
         config["plan"] = dict(config["plan"])
         config["plan"]["currency"] = args.currency
+
+    if args.tag:
+        sid, word = args.tag
+        included = parse_tag_word(word)
+        if included is None:
+            sys.stderr.write("HATA: etiket 'dahil' veya 'haric' olmali "
+                             "('{}' verildi).\n".format(word))
+            return 2
+        known = set(s["session_id"] for s in collect_sessions(config))
+        if sid not in known:
+            sys.stderr.write("HATA: '{}' kapsamda bir session degil. "
+                             "--tag-list ile bakin.\n".format(sid))
+            return 2
+        store = load_tags()
+        set_tag(store, sid, included)
+        written = save_tags(store)
+        print("Etiketlendi: {} -> {}".format(sid, TAG_LABELS[included]))
+        print("  {}".format(written))
+        return 0
+
+    if args.untag:
+        store = load_tags()
+        if get_tag(store, args.untag) is None:
+            print("Zaten etiketsiz: {}".format(args.untag))
+            return 0
+        remove_tag(store, args.untag)
+        save_tags(store)
+        print("Etiket kaldirildi: {} -> etiketsiz".format(args.untag))
+        return 0
+
+    if args.tag_list:
+        print(render_tag_list(collect_sessions(config),
+                              only_untagged=args.untagged))
+        return 0
 
     if args.selftest:
         return selftest(config, config_path)
