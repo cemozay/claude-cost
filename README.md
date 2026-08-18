@@ -28,19 +28,28 @@ gelir. Windows'ta yoksa: `winget install Python.Python.3.12`
 Claude Code içinde `/cost` yaz — ya da "bu session ne kadar tuttu", "bu ay ne
 kadar harcadım" gibi bir şey sor.
 
-Doğrudan komut satırından da çalışır:
+Doğrudan komut satırından da çalışır (ama gerekmez — hepsi `/cost` üzerinden
+doğal dille yapılabilir):
 
 ```
-python scripts/claude_cost.py                  # o anki session
-python scripts/claude_cost.py --session <id>   # belirli session
-python scripts/claude_cost.py --month          # bu ayın özeti (tüm projeler)
-python scripts/claude_cost.py --month 2026-07  # belirli ay
-python scripts/claude_cost.py --plan 100       # plan tutarını bu çalıştırma için ez
-python scripts/claude_cost.py --set-plan 100   # config'e kalıcı yaz
-python scripts/claude_cost.py --idle-gap 10    # ara eşiğini bu çalıştırma için ez (dk)
-python scripts/claude_cost.py --set-idle-gap 10 # ara eşiğini kalıcı yaz (dk)
-python scripts/claude_cost.py --json           # makine okunur çıktı
-python scripts/claude_cost.py --selftest       # doğrulama modu
+python scripts/claude_cost.py                     # o anki session
+python scripts/claude_cost.py --month             # bu ayin ozeti
+python scripts/claude_cost.py --month 2026-07     # belirli ay
+
+python scripts/claude_cost.py --tag-list --untagged                 # etiketsizler
+python scripts/claude_cost.py --tag <id> dahil                      # tek etiket
+python scripts/claude_cost.py --untag <id>                          # etiketi kaldir
+python scripts/claude_cost.py --tag-project "*Frames*" dahil --yes  # toplu
+
+python scripts/claude_cost.py --set-tracking-start 2026-08  # takip baslangici
+python scripts/claude_cost.py --suggest-baseline            # taban tavsiyesi (yazmaz)
+python scripts/claude_cost.py --set-baseline 1500           # tabani yaz
+
+python scripts/claude_cost.py --export out.json --machine workcube  # disa aktar
+
+python scripts/claude_cost.py --idle-gap 10       # ara esigini gecici ez (dk)
+python scripts/claude_cost.py --json              # makine okunur cikti
+python scripts/claude_cost.py --selftest          # 33 dogrulama kontrolu
 ```
 
 ## Örnek çıktı
@@ -48,29 +57,44 @@ python scripts/claude_cost.py --selftest       # doğrulama modu
 ```
 Session:   Brainstorm superpowers with Velvet Creek
 Proje:     C:\Users\cemyu  (HEAD)
-Baslangic: 16 Agustos 2026 18:34   Bitis: 18:50
+Etiket:    dahil
+Baslangic: 16 Agustos 2026 18:34   Bitis: 18 Aug 2026 17:56
 
 Sure
-  Duvar saati : 6sa 09dk 09sn
-  Aktif       : 27dk 26sn   (5sa 41dk 43sn bosluk haric, esik 5dk)
-    haric tutulan aralar (3 adet):
+  Duvar saati : 47sa 21dk 45sn
+  Aktif       : 3sa 22dk 59sn   (43sa 58dk 47sn bosluk haric, esik 5dk)
+    haric tutulan aralar (17 adet):
+      17 Aug 13:40  13sa 20dk 35sn
+      18 Aug 04:02  12sa 16dk 35sn
+      17 Aug 02:16  11sa 07dk 45sn
       16 Aug 19:05   5sa 26dk 03sn
-      16 Aug 18:55        9dk 52sn
-      16 Aug 18:34        5dk 48sn
+      18 Aug 03:27       16dk 00sn
+      18 Aug 16:59       12dk 14sn
+      ... 11 ara daha
 
-Token (requestId ile tekillestirilmis, 22 istek)
-  input                      43      cache write 5dk               0
-  output                 37.600      cache write 1sa         417.842
-  cache read          8.135.769
+Token (requestId ile tekillestirilmis, 245 istek)
+  input                     470      cache write 5dk               0
+  output                335.293      cache write 1sa       4.605.626
+  cache read        139.878.536
 
 A) API-karsiligi maliyet
-  claude-opus-5             $9.19
-  TOPLAM                    $9.19
-                                   -> Pro plan $20.00 tutarinin %45.9'i
+  claude-opus-5           $124.38
+  <synthetic>               $0.00
+  TOPLAM                  $124.38
 
-B) Plan payi - Agustos 2026  (ay ici, gecici)
-  Bu ay: 33 session, toplam API-karsiligi $1,572.48
-  Bu session payi: %0.6  ->  $0.12 / $20.00
+B) Plan maliyeti (sabit oran)
+  Taban          : $1,500.00/ay   (2026-08-18 tarihinde elle konuldu)
+  Bu session     : $124.38 / $1,500.00 x $20.00  =  $1.66   [SABIT]
+```
+
+Aylık özet:
+
+```
+Agustos 2026  (ay ici, gecici)
+
+  Dahil     :  34 session    $1,672.89
+  Taban     : $1,500.00/ay  ->  kullanim %111.5  ->  plan maliyeti $22.31
+  Etiketsiz :   4 session      $262.91   (hesaba KATILMADI)
 ```
 
 ## Molalar: `Duvar saati` vs `Aktif`
@@ -107,15 +131,46 @@ yanlışlıkla "mola" saymıyor. Eşiği 3 dakikanın altına çekersen bu güve
 ## İki maliyet modeli neden var?
 
 - **A) API-karşılığı maliyet** — session'ın token kullanımının API liste
-  fiyatındaki karşılığı. Abonelik planında bu tutar gerçekte tahsil edilmez;
-  session'ın "ağırlığını" ölçen mutlak bir rakamdır.
-- **B) Plan payı** — aynı ay içindeki tüm session'lar arasında plan bedelinin
-  dağıtılmış hali: `session_maliyeti / ay_toplamı × plan_tutarı`.
-  Dağıtım anahtarı ham token değil **maliyettir**, çünkü output token input'un
-  5 katı pahalıdır — tek savunulabilir anahtar budur.
+  fiyatındaki karşılığı. Abonelik planında bu tutar tahsil edilmez; session'ın
+  "ağırlığını" ölçen mutlak bir rakamdır.
+- **B) Plan maliyeti (sabit oran)** — `session_API_karşılığı ÷ TABAN × plan`.
 
-Ay bitmemişse `(ay içi, geçici)` etiketi çıkar: ay ilerledikçe aynı session'ın
-payı düşer. Beklenen davranış.
+**Neden taban?** Önceki sürümde payda ayın o ana kadarki toplamıydı; ay
+ilerledikçe aynı session'ın rakamı düşüyordu. Session bitiminde sabit bir sayı
+alınamıyor, oturumlar ve aylar karşılaştırılamıyordu.
+
+Bir rakam **aynı anda** hem session bitince sabitlenip hem ay sonunda toplamı
+tam plan tutarını edemez — session biterken kaç oturum daha açılacağı bilinmez.
+**Sabitlik seçildi.** Aylık toplamın plan tutarından sapması bilgidir:
+%130 "planı yoğun kullanıyorum", %40 "az kullanıyorum".
+
+Taban `--suggest-baseline` ile önerilir ama **rakamı sen seçersin**; araç
+kendiliğinden yazmaz. Taban yoksa rapor hiç rakam basmaz, durumu bildirir.
+
+## Hangi session'lar sayılıyor
+
+Claude hem müşteri işlerinde hem kendi projelerinde kullanılıyor. Yalnızca
+**etiketlenmiş** oturumlar plan maliyetine girer:
+
+| Etiket | Anlamı |
+|---|---|
+| `dahil` | müşteri işi, hesaba katılır |
+| `haric` | kendi projen, katılmaz |
+| **etiketsiz** | üçüncü durum: ne dahil ne hariç, raporda **ayrı satırda** görünür |
+
+Etiketsiz oturumlar sessizce bir tarafa yazılmaz — etiketlemeyi unutursan
+rakamın eksik olduğunu görürsün. `tracking_start_month` ile takibin başladığı
+ay belirlenir; öncesindeki oturumlar hiç görünmez.
+
+Etiketlemeyi elle yapmazsın: `/cost` içinden "etiketsizleri göster" dersin,
+numaralı liste gelir, "1 ve 3 dahil" dersin. UUID görmezsin.
+
+## Çok makineli kullanım
+
+Her makinede `--export`, dosyaları ana makinede `~/.claude/cost-imports/`
+klasörüne koy. Rapor hepsini birleştirir, `session_id` ile tekilleştirir
+(yerel veri kazanır). Export'ta **ham konuşma yoktur** — yalnızca süre/token/
+maliyet özeti; ölçülen boyut 38 oturum için 19 KB.
 
 ## Neden `requestId` ile tekilleştirme?
 
@@ -137,6 +192,9 @@ sonra naif/dedup oranını basar. Sabit, makineye özel rakamlara dayanmaz.
 {
   "plan": {"amount": 20.0, "currency": "USD", "label": "Pro"},
   "idle_gap_seconds": 300,
+  "tracking_start_month": "2026-08",
+  "baseline_monthly_api_cost": 1500.0,
+  "baseline_source": {"set_at": "2026-08-18T09:00:00+00:00", "method": "manual"},
   "pricing_per_mtok": {
     "claude-opus-5": {"input": 5.0, "output": 25.0}
   },
@@ -148,6 +206,11 @@ sonra naif/dedup oranını basar. Sabit, makineye özel rakamlara dayanmaz.
 - Cache maliyeti input fiyatının çarpanı olarak hesaplanır (API'nin gerçek modeli budur):
   5dk yazma 1.25×, 1sa yazma 2.0×, okuma 0.1×.
 - `idle_gap_seconds` — "aktif süre" hesabında bu eşiği aşan boşluklar düşülür.
+- `tracking_start_month` — takibin başladığı ay; öncesi hiç görünmez.
+- `baseline_monthly_api_cost` — **dondurulmuş taban.** Kendiliğinden asla
+  değişmez; yalnızca `--set-baseline` yazar. `baseline_source` nereden geldiğini
+  kaydeder ki aylar sonra rakam açıklanabilsin.
+- Etiketler ayrı dosyada: `~/.claude/cost-tags.json` (o da repoya girmez).
 - **Fiyat tablosunda olmayan model sessizce 0 sayılmaz**: `WARN` basılır ve
   rapora `EKSIK` notu düşer.
 
