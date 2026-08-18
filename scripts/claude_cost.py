@@ -209,6 +209,25 @@ def load_tags(path=None):
     if not isinstance(data, dict) or not isinstance(data.get("tags"), dict):
         sys.stderr.write("UYARI: etiket dosyasi bozuk, bos kabul ediliyor: {}\n".format(path))
         return {"version": 1, "tags": {}}
+
+    # Deger dogrulamasi: yalnizca gercek bool (True/False) kabul edilir.
+    # Elle duzenlenmis dosya 1/0/"true"/null gibi degerler tasiyabilir.
+    # `isinstance(1, bool)` False, ama Python'da `1 == True` oldugu icin bir
+    # dict anahtari olarak True ile 1 CAKISIR; sessizce kabul edilirse uc
+    # durumlu mantik (dahil/haric/etiketsiz) bozulur ve rapor ya yanlis
+    # etiketle ("dahil" gorunur) ya da coker. Gecersiz deger asla sessizce
+    # coz(dur)ulmez: acikca stderr'e uyari yazilir ve o oturum etiketsiz
+    # sayilir.
+    gecerli_tags = {}
+    for sid, val in data["tags"].items():
+        if val is True or val is False:
+            gecerli_tags[sid] = val
+        else:
+            sys.stderr.write(
+                "UYARI: etiket dosyasinda gecersiz deger, atlaniyor "
+                "(etiketsiz sayilacak): session={} deger={!r}\n".format(sid, val))
+    data = dict(data)
+    data["tags"] = gecerli_tags
     return data
 
 
@@ -715,6 +734,13 @@ def render_text(report):
                 report["session"]["session_id"]))
         elif report.get("baseline_error"):
             L.append("  {}".format(report["baseline_error"]))
+        elif not report.get("fixed_cost"):
+            # Buraya normalde tag True VE baseline_error yokken girilir; o
+            # durumda fixed_cost dolu olmali. Eksikse rapor kurulumunda bir
+            # tutarsizlik var demektir. Coken bir dereferans yerine acik bir
+            # mesaj: yanlis rakam basmaktansa hicbir rakam basmamak yeglenir.
+            L.append("  HATA: sabit plan maliyeti hesaplanamadi (beklenmeyen "
+                     "durum: fixed_cost eksik). Rakam basilmadi.")
         else:
             fc = report["fixed_cost"]
             src = report.get("baseline_source") or {}
@@ -1171,6 +1197,23 @@ def selftest(config, config_path):
         _path19b, _c19b, config_path, tags=_store19b(True)))
     _r19b_dahil = "[SABIT]" in _txt19b_dahil
 
+    # [SABIT] etiketi render_text'in format dizesinde SABIT bir dize: dogru
+    # dala girildiginde kosulsuz basilir, basilan RAKAMIN dogrulugunu KANITLAMAZ.
+    # build_session_report -> fixed_plan_cost hattina yanlis deger sizsa (mesela
+    # session yerine ay toplami gecirilse) [SABIT] yine basilir ve bu kontrol
+    # yine PASS derdi. Bu yuzden beklenen tutar burada BAGIMSIZ (fixed_plan_cost
+    # cagirmadan) hesaplanip render_text'in urettigi TAM satirla karsilastirilir.
+    _session_cost19b = _probe19b["total_cost"]
+    _baseline19b = 1000.0
+    _plan_amt19b = 20.0
+    _expected_amount19b = _session_cost19b / _baseline19b * _plan_amt19b
+    _expected_line19b = "  Bu session     : {} / {} x {}  =  {}   [SABIT]".format(
+        fmt_money(_session_cost19b, "USD"),
+        fmt_money(_baseline19b, "USD"),
+        fmt_money(_plan_amt19b, "USD"),
+        fmt_money(_expected_amount19b, "USD"))
+    _r19b_dahil_deger = _expected_line19b in _txt19b_dahil
+
     _txt19b_haric = render_text(build_session_report(
         _path19b, _c19b, config_path, tags=_store19b(False)))
     _r19b_haric = "[SABIT]" not in _txt19b_haric and "HARIC" in _txt19b_haric
@@ -1187,8 +1230,100 @@ def selftest(config, config_path):
 
     results.append(_ok(
         "19b. render_text dort durumu dogru basiyor/basmiyor",
-        _r19b_dahil and _r19b_haric and _r19b_etiketsiz and _r19b_tabansiz,
-        "dahil->[SABIT] var; haric/etiketsiz/tabansiz->[SABIT] yok"))
+        _r19b_dahil and _r19b_dahil_deger and _r19b_haric and _r19b_etiketsiz
+        and _r19b_tabansiz,
+        "dahil->[SABIT] var + rakam dogru ({}); haric/etiketsiz/tabansiz"
+        "->[SABIT] yok".format(fmt_money(_expected_amount19b, "USD"))))
+
+    print("\n-- 19c. Bozuk etiket degeri (guvensiz depo) --")
+    # Elle duzenlenmis cost-tags.json {"tags": {sid: 1}} gibi bir deger
+    # tasiyabilir (bool degil, int 1). load_tags bunu REDDETMELI: uyari
+    # yazip kaydi dusurmeli, boylece session etiketsiz okunur. Reddedilmezse
+    # `report["tag"] is True` False doner (1 is not True), rapor "dahil"
+    # gorunur (TAG_LABELS[1] == TAG_LABELS[True], cunku 1 == True) ama
+    # fixed_cost hic hesaplanmaz -> render_text'te coken bir dereferans.
+    import tempfile as _tf19c
+    import io as _io19c
+    import contextlib as _ctx19c
+    _td19c = _tf19c.mkdtemp(prefix="claude_cost_badtag_")
+    _tp19c = Path(_td19c) / "tags.json"
+    try:
+        _sid19c = _sid19b
+        with open(str(_tp19c), "w", encoding="utf-8") as _f19c:
+            json.dump({"version": 1, "tags": {_sid19c: 1}}, _f19c)
+
+        _stderr19c = _io19c.StringIO()
+        with _ctx19c.redirect_stderr(_stderr19c):
+            _store19c = load_tags(_tp19c)
+        _warn19c = ("UYARI" in _stderr19c.getvalue()
+                    and _sid19c in _stderr19c.getvalue())
+        _dropped19c = get_tag(_store19c, _sid19c) is None
+
+        _crash19c = False
+        try:
+            _report19c = build_session_report(_path19b, _c19b, config_path,
+                                              tags=_store19c)
+            _txt19c = render_text(_report19c)
+        except Exception as _e19c:
+            _crash19c = True
+            _txt19c = "COKTU: {!r}".format(_e19c)
+        _no_crash19c = not _crash19c
+        _etiketsiz19c = "Etiket:    etiketsiz" in _txt19c
+
+        results.append(_ok(
+            "19c. Bozuk etiket degeri (1) uyariyla dusuruluyor, etiketsiz "
+            "okunuyor, cokmuyor",
+            _warn19c and _dropped19c and _no_crash19c and _etiketsiz19c,
+            "uyari-yazildi={}, depodan-dustu={}, coktu={}, "
+            "etiket-satiri-etiketsiz={}".format(
+                _warn19c, _dropped19c, _crash19c, _etiketsiz19c)))
+    finally:
+        try:
+            _tp19c.unlink()
+            os.rmdir(_td19c)
+        except OSError:
+            pass
+
+    print("\n-- 19d. --tags/--config main() uctan uca --")
+    # Onceki bir duzeltme build_session_report'a tags= parametresini gecirdi
+    # ve main() bunu load_tags(args.tags) ile besledi (--tags eskiden session
+    # raporlarinda YOK sayiliyordu). Bu duzeltmenin dogrudan bir testi yoktu:
+    # 19b build_session_report'u main() uzerinden DEGIL, bellek-ici sozlukle
+    # cagiriyor. `report = build_session_report(path, config, config_path,
+    # tags=load_tags(args.tags))` satirindaki `tags=load_tags(args.tags)`
+    # geri alinsa (gercek depo kullanilsa) bu test YAKALAMALI.
+    import tempfile as _tf19d
+    import io as _io19d
+    import contextlib as _ctx19d
+    _td19d = _tf19d.mkdtemp(prefix="claude_cost_e2e_")
+    _tp19d_tags = Path(_td19d) / "tags.json"
+    _tp19d_cfg = Path(_td19d) / "cost-config.json"
+    try:
+        _sid19d = Path(_path19b).stem
+        save_tags(set_tag({"version": 1, "tags": {}}, _sid19d, False), _tp19d_tags)
+        _out19d = _io19d.StringIO()
+        with _ctx19d.redirect_stdout(_out19d):
+            _rc19d = main(["--session", _sid19d,
+                          "--tags", str(_tp19d_tags),
+                          "--config", str(_tp19d_cfg)])
+        _txt19d = _out19d.getvalue()
+        _ok19d = (_rc19d == 0 and "[SABIT]" not in _txt19d
+                 and "Bu session HARIC tutulmus" in _txt19d)
+        results.append(_ok(
+            "19d. main() --tags gecici depoyu okuyor (gercek depoyu degil)",
+            _ok19d,
+            "cikis={}, [SABIT]-yok={}, HARIC-var={}".format(
+                _rc19d, "[SABIT]" not in _txt19d,
+                "Bu session HARIC tutulmus" in _txt19d)))
+    finally:
+        try:
+            if _tp19d_tags.exists():
+                _tp19d_tags.unlink()
+            if _tp19d_cfg.exists():
+                _tp19d_cfg.unlink()
+            os.rmdir(_td19d)
+        except OSError:
+            pass
 
     print("\n-- 22b. Aylik kanoniklestirilmesi --")
     import tempfile as _tf22b
