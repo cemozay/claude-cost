@@ -232,7 +232,7 @@ Gövdede `if args.set_idle_gap is not None:` bloğunun ardına:
         if args.set_tracking_start is not None:
             txt = args.set_tracking_start.strip()
             try:
-                datetime.datetime.strptime(txt, "%Y-%m")
+                parsed = datetime.datetime.strptime(txt, "%Y-%m")
             except ValueError:
                 sys.stderr.write("HATA: --set-tracking-start YYYY-MM biciminde "
                                  "olmali (ornek 2026-08).\n")
@@ -241,8 +241,7 @@ Gövdede `if args.set_idle_gap is not None:` bloğunun ardına:
             # eder; ham saklanirsa in_tracking_scope'un dize karsilastirmasi
             # bozulur ("2026-08" >= "2026-1" False doner) ve oturumlar sessizce
             # kaybolur. Global Constraint: sessizce yanlis sayi basilmaz.
-            config["tracking_start_month"] = datetime.datetime.strptime(
-                txt, "%Y-%m").strftime("%Y-%m")
+            config["tracking_start_month"] = parsed.strftime("%Y-%m")
 ```
 
 Ve aynı bloğun sonundaki özet çıktısına (`print("  ara esigi: ...")` altına):
