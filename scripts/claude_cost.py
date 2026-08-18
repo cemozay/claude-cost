@@ -662,6 +662,7 @@ def render_text(report):
         if s.get("gitBranch"):
             proje += "  ({})".format(s["gitBranch"])
         L.append("Proje:     {}".format(proje))
+        L.append("Etiket:    {}".format(TAG_LABELS[report.get("tag")]))
         if d["start"] and d["end"]:
             st, en = to_local(d["start"]), to_local(d["end"])
             L.append("Baslangic: {} {} {}   Bitis: {}".format(
@@ -702,25 +703,30 @@ def render_text(report):
                 model, fmt_money(slot["cost"], cur), mark))
         L.append("  {:<20} {:>10}".format("TOPLAM",
                                           fmt_money(report["total_cost"], cur)))
-        plan = report["plan"]
-        if plan["amount"] > 0:
-            pct = report["total_cost"] / plan["amount"] * 100.0
-            L.append("  {:<20} {:>10}  -> {} plan {} tutarinin %{:.1f}'i".format(
-                "", "", plan.get("label", ""), fmt_money(plan["amount"], cur), pct))
         L.append("")
 
-        m = report.get("month_context")
-        if m:
-            mk = m["month"]
-            y, mo = mk.split("-")
-            etiket = "  (ay ici, gecici)" if is_current_month(mk) else ""
-            L.append("B) Plan payi - {} {}{}".format(TR_MONTHS[int(mo)], y, etiket))
-            L.append("  Bu ay: {} session, toplam API-karsiligi {}".format(
-                m["session_count"], fmt_money(m["total_cost"], cur)))
-            L.append("  Bu session payi: %{:.1f}  ->  {} / {}".format(
-                m["share"]["ratio"] * 100.0,
-                fmt_money(m["share"]["amount"], cur),
-                fmt_money(plan["amount"], cur)))
+        plan = report["plan"]
+        L.append("B) Plan maliyeti (sabit oran)")
+        if report.get("tag") is False:
+            L.append("  Bu session HARIC tutulmus - plan maliyetine katilmiyor.")
+        elif report.get("tag") is None:
+            L.append("  Bu session ETIKETSIZ - plan maliyeti hesaplanmadi.")
+            L.append("  Dahil etmek icin: --tag {} dahil".format(
+                report["session"]["session_id"]))
+        elif report.get("baseline_error"):
+            L.append("  {}".format(report["baseline_error"]))
+        else:
+            fc = report["fixed_cost"]
+            src = report.get("baseline_source") or {}
+            not_ = src.get("set_at", "")[:10]
+            L.append("  Taban          : {}/ay{}".format(
+                fmt_money(fc["baseline"], cur),
+                "   ({} tarihinde elle konuldu)".format(not_) if not_ else ""))
+            L.append("  Bu session     : {} / {} x {}  =  {}   [SABIT]".format(
+                fmt_money(report["total_cost"], cur),
+                fmt_money(fc["baseline"], cur),
+                fmt_money(plan["amount"], cur),
+                fmt_money(fc["amount"], cur)))
     else:
         m = report["month"]
         mk = m["month"]
@@ -795,7 +801,7 @@ def render_tag_list(sessions, only_untagged=False):
 
 # ---------------------------------------------------------------- rapor kurma
 
-def build_session_report(path, config, config_path, with_month=True):
+def build_session_report(path, config, config_path, tags=None):
     parsed = parse_session(path)
     idle_gap = float(config.get("idle_gap_seconds", 300))
     duration = compute_duration(parsed["timestamps"], idle_gap)
@@ -807,6 +813,7 @@ def build_session_report(path, config, config_path, with_month=True):
         "version": __version__,
         "config_path": str(config_path),
         "plan": plan,
+        "baseline_source": config.get("baseline_source"),
         "idle_gap": idle_gap,
         "session": {
             "session_id": parsed["meta"].get("sessionId") or Path(path).stem,
@@ -825,16 +832,18 @@ def build_session_report(path, config, config_path, with_month=True):
         "bad_lines": parsed["bad_lines"],
     }
 
-    if with_month and duration["start"] is not None:
-        mk = month_key(duration["start"])
-        totals = month_totals(mk, config)
-        report["month_context"] = {
-            "month": mk,
-            "session_count": totals["session_count"],
-            "total_cost": totals["total_cost"],
-            "share": plan_share(priced["total_cost"], totals["total_cost"],
-                                float(plan.get("amount", 0.0))),
-        }
+    if tags is None:
+        tags = load_tags()
+    report["tag"] = get_tag(tags, report["session"]["session_id"])
+    report["in_scope"] = in_tracking_scope(duration["start"], config)
+
+    report["fixed_cost"] = None
+    report["baseline_error"] = None
+    if report["tag"] is True:
+        try:
+            report["fixed_cost"] = fixed_plan_cost(priced["total_cost"], config)
+        except BaselineNotSetError as exc:
+            report["baseline_error"] = str(exc)
     return report
 
 
@@ -1124,6 +1133,20 @@ def selftest(config, config_path):
         and _gecerli,
         "{}/{} deger reddedildi, gecerli taban calisiyor".format(
             len(_reddedilen), len(_bad))))
+
+    print("\n-- 19. Sabit oran degismezligi --")
+    _c19 = json.loads(json.dumps(config))
+    _c19["baseline_monthly_api_cost"] = 1000.0
+    _c19["plan"] = {"amount": 20.0, "currency": "USD", "label": "Pro"}
+    _once = fixed_plan_cost(50.0, _c19)["amount"]
+    # Ay toplaminin degismesi rakami ETKILEMEMELI: payda taban, ay toplami degil.
+    _sonra = fixed_plan_cost(50.0, _c19)["amount"]
+    _cift = fixed_plan_cost(100.0, _c19)["amount"]
+    results.append(_ok(
+        "19. Ay toplami degisse de session rakami sabit",
+        abs(_once - _sonra) < 1e-12 and abs(_once - 1.0) < 1e-9
+        and abs(_cift - 2.0) < 1e-9,
+        "50/1000x20 = {:.4f} (iki cagride ayni), 100 -> {:.4f}".format(_once, _cift)))
 
     print("\n-- 22b. Aylik kanoniklestirilmesi --")
     import tempfile as _tf22b
@@ -1423,7 +1446,8 @@ def main(argv=None):
             sys.stderr.write("HATA: {} altinda hic transcript (.jsonl) yok.\n"
                              .format(PROJECTS_DIR))
             return 2
-        report = build_session_report(path, config, config_path)
+        report = build_session_report(path, config, config_path,
+                                      tags=load_tags(args.tags))
         report["session"]["found_by"] = how
 
     print(render_json(report) if args.json else render_text(report))
