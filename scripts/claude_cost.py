@@ -477,7 +477,7 @@ def collect_sessions(config, tags=None, quiet=True):
     out = []
     stderr = sys.stderr
     if quiet:
-        sys.stderr = open(os.devnull, "w")
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
     try:
         for path in all_session_files():
             parsed = parse_session(path)
@@ -525,7 +525,7 @@ def month_totals(month, config, quiet=True):
     sessions = []
     stderr = sys.stderr
     if quiet:
-        sys.stderr = open(os.devnull, "w")  # tarama sirasinda WARN spam'ini bastir
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")  # tarama sirasinda WARN spam'ini bastir
     try:
         for path in all_session_files():
             parsed = parse_session(path)
