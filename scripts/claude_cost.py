@@ -620,18 +620,25 @@ def load_imported_sessions_from(directory, tags):
             end = parse_ts(e.get("end"))
             if start is None:
                 continue
-            out.append({
-                "session_id": sid, "title": e.get("title"), "cwd": e.get("cwd"),
-                "gitBranch": e.get("gitBranch"), "slug": None, "path": str(fp),
-                "machine": makine, "start": start, "end": end or start,
-                "active_seconds": float(e.get("active_seconds") or 0.0),
-                "wall_seconds": float(e.get("wall_seconds") or 0.0),
-                "cost": float(e.get("cost") or 0.0),
-                "tokens": e.get("tokens") or {}, "per_model": {},
-                "request_count": int(e.get("request_count") or 0),
-                "unknown_models": e.get("unknown_models") or [],
-                "tag": get_tag(tags, sid),
-            })
+            try:
+                entry = {
+                    "session_id": sid, "title": e.get("title"), "cwd": e.get("cwd"),
+                    "gitBranch": e.get("gitBranch"), "slug": None, "path": str(fp),
+                    "machine": makine, "start": start, "end": end or start,
+                    "active_seconds": float(e.get("active_seconds") or 0.0),
+                    "wall_seconds": float(e.get("wall_seconds") or 0.0),
+                    "cost": float(e.get("cost") or 0.0),
+                    "tokens": e.get("tokens") or {}, "per_model": {},
+                    "request_count": int(e.get("request_count") or 0),
+                    "unknown_models": e.get("unknown_models") or [],
+                    "tag": get_tag(tags, sid),
+                }
+            except (ValueError, TypeError) as exc:
+                sys.stderr.write(
+                    "UYARI: import kaydi bozuk, atlandi: {} session={} ({})\n"
+                    .format(fp.name, sid, exc))
+                continue
+            out.append(entry)
     return out
 
 
@@ -1489,6 +1496,163 @@ def selftest(config, config_path):
         except OSError:
             pass
 
+    print("\n-- 17b. collect_sessions import birlestirme (kapsam + yerel kazanir) --")
+    import tempfile as _tf17b
+    _id17b = Path(_tf17b.mkdtemp(prefix="claude_cost_merge_"))
+    try:
+        _local17b = collect_sessions(config, include_imports=False)
+        if not _local17b:
+            results.append(_ok(
+                "17b. collect_sessions import birlestirme (kapsam + yerel kazanir)",
+                False, "yerel session yok, test kosulamadi"))
+        else:
+            _probe17b = _local17b[0]
+            _c17b = json.loads(json.dumps(config))
+            _c17b["tracking_start_month"] = month_key(_probe17b["start"])
+
+            _new_sid17b = "MERGE-TEST-NEW-SESSION-ID"
+            _old_sid17b = "MERGE-TEST-OLD-SESSION-ID"
+            _now17b = datetime.datetime.now(datetime.timezone.utc)
+            _collision_start17b = _probe17b["start"]
+            _old_start17b = _probe17b["start"] - datetime.timedelta(days=60)
+            _fake_payload17b = {
+                "version": EXPORT_VERSION, "machine": "uzak-makine",
+                "exported_at": _now17b.isoformat(),
+                "sessions": [
+                    {
+                        "session_id": _new_sid17b,
+                        "start": _now17b.isoformat(),
+                        "end": (_now17b + datetime.timedelta(minutes=5)).isoformat(),
+                        "active_seconds": 120.0, "wall_seconds": 120.0,
+                        "cwd": "/uzak", "gitBranch": None, "title": "uzak-yeni",
+                        "request_count": 1, "tokens": {}, "cost": 4.5,
+                        "unknown_models": [],
+                    },
+                    {
+                        # Yerelde GERCEKTEN var olan bir session_id ile carpisir.
+                        # Maliyet ve makine bilerek FARKLI: yerel kazanmazsa
+                        # bu deger sizip testi ele verir.
+                        "session_id": _probe17b["session_id"],
+                        "start": _collision_start17b.isoformat(),
+                        "end": (_collision_start17b
+                               + datetime.timedelta(minutes=5)).isoformat(),
+                        "active_seconds": 999.0, "wall_seconds": 999.0,
+                        "cwd": "/carpisma", "gitBranch": None, "title": "carpisma",
+                        "request_count": 999, "tokens": {}, "cost": 123456.0,
+                        "unknown_models": [],
+                    },
+                    {
+                        "session_id": _old_sid17b,
+                        "start": _old_start17b.isoformat(),
+                        "end": (_old_start17b
+                               + datetime.timedelta(minutes=5)).isoformat(),
+                        "active_seconds": 60.0, "wall_seconds": 60.0,
+                        "cwd": "/eski", "gitBranch": None, "title": "kapsam-disi",
+                        "request_count": 1, "tokens": {}, "cost": 1.0,
+                        "unknown_models": [],
+                    },
+                ],
+            }
+            with open(str(_id17b / "uzak.json"), "w", encoding="utf-8") as _fh17b:
+                json.dump(_fake_payload17b, _fh17b)
+
+            global IMPORTS_DIR
+            _orig_imports_dir17b = IMPORTS_DIR
+            IMPORTS_DIR = _id17b
+            try:
+                _merged17b = collect_sessions(_c17b, load_tags(),
+                                              quiet=True, include_imports=True)
+            finally:
+                IMPORTS_DIR = _orig_imports_dir17b
+
+            _by_id17b = dict((s["session_id"], s) for s in _merged17b)
+
+            _new_ok17b = (_new_sid17b in _by_id17b
+                         and _by_id17b[_new_sid17b]["machine"] == "uzak-makine")
+            _collision_matches17b = [s for s in _merged17b
+                                     if s["session_id"] == _probe17b["session_id"]]
+            _local_wins17b = (
+                len(_collision_matches17b) == 1
+                and abs(_collision_matches17b[0]["cost"] - _probe17b["cost"]) < 0.01
+                and _collision_matches17b[0]["machine"] == "(yerel)")
+            _scope_drop17b = _old_sid17b not in _by_id17b
+
+            results.append(_ok(
+                "17b. collect_sessions import birlestirme (kapsam + yerel kazanir)",
+                _new_ok17b and _local_wins17b and _scope_drop17b,
+                "yeni-goruldu={} yerel-kazandi={} kapsam-disi-dustu={}".format(
+                    _new_ok17b, _local_wins17b, _scope_drop17b)))
+    finally:
+        try:
+            for _f in _id17b.glob("*"):
+                _f.unlink()
+            os.rmdir(str(_id17b))
+        except OSError:
+            pass
+
+    print("\n-- 17c. load_imported_sessions_from bozuk alan -> atla + uyar --")
+    import tempfile as _tf17c
+    import io as _io17c
+    _id17c = Path(_tf17c.mkdtemp(prefix="claude_cost_bozuk_"))
+    try:
+        _good_sid17c = "BOZUK-TEST-IYI-SESSION-ID"
+        _bad_sid17c = "BOZUK-TEST-KOTU-SESSION-ID"
+        _now17c = datetime.datetime.now(datetime.timezone.utc)
+        _payload17c = {
+            "version": EXPORT_VERSION, "machine": "bozuk-makine",
+            "exported_at": _now17c.isoformat(),
+            "sessions": [
+                {
+                    "session_id": _bad_sid17c,
+                    "start": _now17c.isoformat(),
+                    "end": (_now17c + datetime.timedelta(minutes=5)).isoformat(),
+                    "active_seconds": 60.0, "wall_seconds": 60.0,
+                    "cwd": "/bozuk", "gitBranch": None, "title": "bozuk",
+                    "request_count": 1, "tokens": {}, "cost": "expensive",
+                    "unknown_models": [],
+                },
+                {
+                    "session_id": _good_sid17c,
+                    "start": _now17c.isoformat(),
+                    "end": (_now17c + datetime.timedelta(minutes=5)).isoformat(),
+                    "active_seconds": 30.0, "wall_seconds": 30.0,
+                    "cwd": "/iyi", "gitBranch": None, "title": "iyi",
+                    "request_count": 1, "tokens": {}, "cost": 2.0,
+                    "unknown_models": [],
+                },
+            ],
+        }
+        with open(str(_id17c / "bozuk.json"), "w", encoding="utf-8") as _fh17c:
+            json.dump(_payload17c, _fh17c)
+
+        _stderr17c = sys.stderr
+        sys.stderr = _io17c.StringIO()
+        _crashed17c = False
+        _imported17c = []
+        try:
+            _imported17c = load_imported_sessions_from(_id17c, load_tags())
+        except Exception:
+            _crashed17c = True
+        finally:
+            _warned17c = sys.stderr.getvalue()
+            sys.stderr = _stderr17c
+
+        _ids17c = [s["session_id"] for s in _imported17c]
+        results.append(_ok(
+            "17c. Bozuk import alani cokmez, atlanir ve uyari verilir",
+            (not _crashed17c) and _good_sid17c in _ids17c
+            and _bad_sid17c not in _ids17c and "UYARI" in _warned17c,
+            "coktu={} iyi-var={} kotu-yok={} uyari-var={}".format(
+                _crashed17c, _good_sid17c in _ids17c,
+                _bad_sid17c not in _ids17c, "UYARI" in _warned17c)))
+    finally:
+        try:
+            for _f in _id17c.glob("*"):
+                _f.unlink()
+            os.rmdir(str(_id17c))
+        except OSError:
+            pass
+
     print("\n-- 18b. export_sessions include_imports=False korumasi --")
     import tempfile as _tf18b
     _gd = Path(_tf18b.mkdtemp(prefix="claude_cost_guard_"))
@@ -1513,7 +1677,6 @@ def selftest(config, config_path):
         }
         with open(str(_gd / "sahte.json"), "w", encoding="utf-8") as _fh18b:
             json.dump(_fake_payload, _fh18b)
-        global IMPORTS_DIR
         _orig_imports_dir = IMPORTS_DIR
         IMPORTS_DIR = _gd
         try:
