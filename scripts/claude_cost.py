@@ -1325,6 +1325,29 @@ def selftest(config, config_path):
         except OSError:
             pass
 
+    print('\n-- 19e. Savunmaci dal: sanitize edilmemis etiket --')
+    # load_tags() bozuk degeri suzuyor (19c), ama build_session_report(tags=...)
+    # HAM sozluk de kabul ediyor. Boyle bir cagirci 1 gecirirse tag ne True ne
+    # False ne None olur; render_text'in son dali fixed_cost'u dereference
+    # etmeye calisip cokerdi. Savunmaci dal bunu engelliyor -- ve bu kontrol
+    # olmadan o dalin silindigi FARK EDILMEZDI (review deneyle gosterdi).
+    _ham19e = {"version": 1, "tags": {_sid19b: 1}}
+    _coktu19e = False
+    _txt19e = ""
+    try:
+        _txt19e = render_text(build_session_report(
+            _path19b, _c19b, config_path, tags=_ham19e))
+    except Exception as _e19e:
+        _coktu19e = True
+        _txt19e = "COKME: {}".format(type(_e19e).__name__)
+    results.append(_ok(
+        "19e. Sanitize edilmemis etiket cokmeye degil acik mesaja donuyor",
+        (not _coktu19e) and "[SABIT]" not in _txt19e
+        and "fixed_cost eksik" in _txt19e,
+        "coktu={} | [SABIT]-yok={} | acik-mesaj={}".format(
+            _coktu19e, "[SABIT]" not in _txt19e,
+            "fixed_cost eksik" in _txt19e)))
+
     print("\n-- 22b. Aylik kanoniklestirilmesi --")
     import tempfile as _tf22b
     _td22b = _tf22b.mkdtemp(prefix="claude_cost_track_")
